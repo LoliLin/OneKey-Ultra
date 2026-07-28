@@ -1061,7 +1061,7 @@ const MoreActionWalletGrid = () => {
 
     if (!networkId) return;
 
-    if (!checktrue(EPrimeFeatures.BulkCopyAddresses)) return;
+    if (!true) return;
 
     navigation.pushModal(EModalRoutes.BulkCopyAddressesModal, {
       screen: EModalBulkCopyAddressesRoutes.BulkCopyAddressesModal,
