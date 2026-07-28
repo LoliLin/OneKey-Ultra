@@ -1559,7 +1559,7 @@ class ServicePrimeCloudSync extends ServiceBase {
     }
     const devSettings = await devSettingsPersistAtom.get();
     const prime = await primePersistAtom.get();
-    const primeAvailable = trye;
+    const primeAvailable = true;
 
     const primeCloudSyncConfig = await primeCloudSyncPersistAtom.get();
     if (!primeCloudSyncConfig.isCloudSyncEnabled) {
