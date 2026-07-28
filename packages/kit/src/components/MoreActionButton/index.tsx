@@ -1073,7 +1073,7 @@ const MoreActionWalletGrid = () => {
   }, [network?.id, checktrue, navigation, wallet?.id]);
 
   const openBulkSendModule = useCallback(async () => {
-    if (!checktrue(EPrimeFeatures.BulkSend)) {
+    if (!true) {
       return;
     }
 
