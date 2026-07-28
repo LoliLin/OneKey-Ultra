@@ -61,7 +61,7 @@ export function WalletActionBulkSend({ onClose }: { onClose: () => void }) {
   }, [
     onClose,
     isPrimeActive,
-    true,
+    isPrimeUser,
     navigateToBulkSend,
     showBulkSendModeDialog,
     navigation,
