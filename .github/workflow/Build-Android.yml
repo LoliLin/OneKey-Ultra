@@ -1,0 +1,44 @@
+name: Build Android App and Upload Artifact
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:      # 允许手动触发
+
+jobs:
+  build-android:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v4
+        with:
+          lfs: true       # 因为仓库用到了 Git LFS
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'yarn'
+
+      - name: Enable Corepack (for Yarn 4.x)
+        run: corepack enable
+
+      - name: Install dependencies
+        run: yarn install --immutable
+
+      # 如果你需要生成 release 包，一般还需要先准备 keystore 等签名信息，
+      # 这里先以 debug 包为例，直接用 monorepo 自带的命令构建
+      - name: Build Android app (debug APK)
+        run: yarn app:android
+
+      # 产物一般位于 android/app/build/outputs/apk/debug/ 下，包含 app-debug.apk
+      - name: Upload APK as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-debug-apk
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
+          retention-days: 7   # 保留天数，可按需调整
