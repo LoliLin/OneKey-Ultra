@@ -10,12 +10,6 @@ export function usePrimeAvailable() {
   const { user } = useOneKeyAuth();
 
   const isPrimeAvailable = useMemo(() => {
-    if (devSettings.enabled && devSettings.settings?.showPrimeTest) {
-      return true;
-    }
-    if (platformEnv.isMas && !user?.primeSubscription?.isActive) {
-      return false;
-    }
     return true;
   }, [
     devSettings.enabled,

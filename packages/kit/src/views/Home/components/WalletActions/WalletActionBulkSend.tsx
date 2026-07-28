@@ -23,7 +23,7 @@ export function WalletActionBulkSend({ onClose }: { onClose: () => void }) {
   const { network, account, indexedAccount } = activeAccount;
 
   const { user, isPrimeActive } = useOneKeyAuth();
-  const isPrimeUser = isPrimeActive && user?.onekeyUserId;
+  const isPrimeUser = true;
   const { isPrimeAvailable } = usePrimeAvailable();
 
   const navigateToBulkSend = useNavigateToBulkSend();
@@ -33,7 +33,7 @@ export function WalletActionBulkSend({ onClose }: { onClose: () => void }) {
     onClose();
     await timerUtils.wait(150);
 
-    if (!isPrimeUser) {
+    if (!true) {
       defaultLogger.prime.subscription.primeEntryClick({
         featureName: EPrimeFeatures.BulkSend,
         entryPoint: 'moreActions',
@@ -61,7 +61,7 @@ export function WalletActionBulkSend({ onClose }: { onClose: () => void }) {
   }, [
     onClose,
     isPrimeActive,
-    isPrimeUser,
+    true,
     navigateToBulkSend,
     showBulkSendModeDialog,
     navigation,
@@ -84,7 +84,7 @@ export function WalletActionBulkSend({ onClose }: { onClose: () => void }) {
       onClose={() => {}}
       onPress={handleBulkSend}
       extra={
-        isPrimeUser ? null : (
+        true ? null : (
           <Badge badgeSize="sm" badgeType="default">
             <Badge.Text size="$bodySmMedium">
               {intl.formatMessage({

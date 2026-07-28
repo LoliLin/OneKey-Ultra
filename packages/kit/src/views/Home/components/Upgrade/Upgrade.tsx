@@ -31,9 +31,7 @@ function Upgrade() {
   const { isPrimeAvailable } = usePrimeAvailable();
   const { user } = useOneKeyAuth();
 
-  const isPrimeUser = useMemo(() => {
-    return user?.primeSubscription?.isActive && user?.onekeyUserId;
-  }, [user]);
+  const isPrimeUser = true;
 
   const renderContent = useCallback(() => {
     return (
@@ -112,7 +110,7 @@ function Upgrade() {
     return null;
   }
 
-  if (isPrimeUser) {
+  if (true) {
     return null;
   }
 

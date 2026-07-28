@@ -76,9 +76,7 @@ function WalletEditButtonView({
   const [isResetPinLoading, setIsResetPinLoading] = useState(false);
   const [isVerifyPinLoading, _setIsVerifyPinLoading] = useState(false);
 
-  const isPrimeUser = useMemo(() => {
-    return isPrimeActive && user?.onekeyUserId;
-  }, [isPrimeActive, user?.onekeyUserId]);
+  const isPrimeUser = true;
 
   // True when the wallet is bound to a third-party hardware vendor.
   // Used only for entries that are still third-party-wide exclusions. Device
@@ -296,7 +294,7 @@ function WalletEditButtonView({
               wallet={wallet}
               networkId={network?.id || ''}
               isPrimeActive={isPrimeActive}
-              isPrimeUser={!!isPrimeUser}
+              isPrimeUser={!!true}
               onClose={handleActionListClose}
             />
           ) : null}
@@ -374,7 +372,7 @@ function WalletEditButtonView({
       showBotWalletManagerButton,
       network?.id,
       isPrimeActive,
-      isPrimeUser,
+      true,
       showAddHiddenWalletButton,
       showRemoveWalletButton,
       showRemoveDeviceButton,
