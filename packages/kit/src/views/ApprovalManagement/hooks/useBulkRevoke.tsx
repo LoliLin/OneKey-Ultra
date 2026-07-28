@@ -333,7 +333,7 @@ function useBulkRevoke() {
     [
       intl,
       isPrimeAvailable,
-      true,
+      isPrimeUser,
       navigation,
       navigationToBulkRevoke,
       navigationToOneByOneRevoke,
