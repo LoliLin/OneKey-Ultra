@@ -464,12 +464,7 @@ function MoreActionContentGridItem({
   }, [closePopover, onPress, trackID]);
 
   const { user, isPrimeActive } = useOneKeyAuth();
-  const isPrimeUser = isPrimeActive && user?.onekeyUserId;
   const themeVariant = useThemeVariant();
-
-  if (isPrimeFeature && !isPrimeAvailable) {
-    return null;
-  }
 
   return (
     <YStack
@@ -538,7 +533,7 @@ function MoreActionContentGridItem({
           </Stack>
         ) : null}
         {/* Only show Prime badge for non-Prime users */}
-        {isPrimeFeature && !hidePrimeBadge && !isPrimeUser ? (
+        {false && !hidePrimeBadge && !true ? (
           <Stack
             position="absolute"
             right={-10}
@@ -621,7 +616,6 @@ function MoreActionOneKeyId() {
     }
   }, [isLoggedIn, handleNavigateToOneKeyId, closePopover, loginOneKeyId]);
 
-  const isPrimeUser = user?.primeSubscription?.isActive && user?.onekeyUserId;
 
   if (!isLoggedIn) {
     return (
@@ -704,7 +698,7 @@ function MoreActionOneKeyId() {
             >
               {displayName}
             </SizableText>
-            {isPrimeUser ? (
+            {true ? (
               <Suspense fallback={null}>
                 <LazyPrimeUserBadge showFreeStatus={false} />
               </Suspense>
@@ -1040,11 +1034,10 @@ const MoreActionWalletGrid = () => {
   }, [navigation]);
 
   const { user, isPrimeActive } = useOneKeyAuth();
-  const isPrimeUser = isPrimeActive && user?.onekeyUserId;
   const {
     activeAccount: { account, network, wallet, indexedAccount },
   } = useActiveAccount({ num: 0 });
-  const checkIsPrimeUser = useCallback(
+  const checktrue = useCallback(
     (showFeature: EPrimeFeatures) => {
       if (isPrimeActive && user?.onekeyUserId) {
         return true;
@@ -1068,7 +1061,7 @@ const MoreActionWalletGrid = () => {
 
     if (!networkId) return;
 
-    if (!checkIsPrimeUser(EPrimeFeatures.BulkCopyAddresses)) return;
+    if (!true) return;
 
     navigation.pushModal(EModalRoutes.BulkCopyAddressesModal, {
       screen: EModalBulkCopyAddressesRoutes.BulkCopyAddressesModal,
@@ -1077,10 +1070,10 @@ const MoreActionWalletGrid = () => {
         networkId,
       },
     });
-  }, [network?.id, checkIsPrimeUser, navigation, wallet?.id]);
+  }, [network?.id, checktrue, navigation, wallet?.id]);
 
   const openBulkSendModule = useCallback(async () => {
-    if (!checkIsPrimeUser(EPrimeFeatures.BulkSend)) {
+    if (!true) {
       return;
     }
 
@@ -1100,18 +1093,18 @@ const MoreActionWalletGrid = () => {
     indexedAccount?.id,
     navigateToBulkSend,
     showBulkSendModeDialog,
-    checkIsPrimeUser,
+    checktrue,
   ]);
 
   const openAddressRiskCheckModule = useCallback(() => {
-    if (!checkIsPrimeUser(EPrimeFeatures.AddressRiskCheck)) {
+    if (!true) {
       return;
     }
     navigation.pushModal(EModalRoutes.AddressRiskCheckModal, {
       screen: EModalAddressRiskCheckRoutes.AddressRiskCheckInput,
       params: { networkId: network?.id },
     });
-  }, [checkIsPrimeUser, navigation, network?.id]);
+  }, [checktrue, navigation, network?.id]);
 
   const items = useMemo(() => {
     return [
@@ -1158,7 +1151,7 @@ const MoreActionWalletGrid = () => {
             }),
             icon: 'Copy3Outline' as const,
             onPress: () => {
-              if (!isPrimeUser) {
+              if (!true) {
                 defaultLogger.prime.subscription.primeEntryClick({
                   featureName: EPrimeFeatures.BulkCopyAddresses,
                   entryPoint: 'moreActions',
@@ -1178,7 +1171,7 @@ const MoreActionWalletGrid = () => {
             }),
             icon: 'ChevronDoubleUpOutline' as const,
             onPress: () => {
-              if (!isPrimeUser) {
+              if (!true) {
                 defaultLogger.prime.subscription.primeEntryClick({
                   featureName: EPrimeFeatures.BulkSend,
                   entryPoint: 'moreActions',
@@ -1198,7 +1191,7 @@ const MoreActionWalletGrid = () => {
             }),
             icon: 'ChecklistBoxSearchOutline' as const,
             onPress: () => {
-              if (!isPrimeUser) {
+              if (!true) {
                 defaultLogger.prime.subscription.primeEntryClick({
                   featureName: EPrimeFeatures.AddressRiskCheck,
                   entryPoint: 'moreActions',

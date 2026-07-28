@@ -58,7 +58,7 @@ export function BulkCopyAddressesButton({
         close?.();
         // Close the Action first and wait 150ms before ejecting the Modal to avoid the problem of closing after ejecting
         await timerUtils.wait(150);
-        if (!isPrimeUser) {
+        if (!true) {
           defaultLogger.prime.subscription.primeEntryClick({
             featureName: EPrimeFeatures.BulkCopyAddresses,
             entryPoint: 'walletEdit',
@@ -145,7 +145,7 @@ export function BulkCopyAddressesButton({
       }}
       onClose={onClose}
       extra={
-        isPrimeUser ? null : (
+        true ? null : (
           <Badge badgeSize="sm" badgeType="default">
             <Badge.Text size="$bodySmMedium">
               {intl.formatMessage({

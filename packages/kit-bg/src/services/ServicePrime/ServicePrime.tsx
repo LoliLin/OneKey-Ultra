@@ -3018,7 +3018,7 @@ class ServicePrime extends ServiceBase {
         onekeyAccount:
           onekeyAccount ??
           (shouldKeepExistingOneKeyAccount ? v.onekeyAccount : undefined),
-        isEnablePrime: serverUserInfo?.isEnablePrime,
+        isEnablePrime: true,
         isEnableSandboxPay: serverUserInfo?.isEnableSandboxPay,
         isPrimeDeviceLimitExceeded: serverUserInfo?.isPrimeDeviceLimitExceeded,
         isLoggedIn: true,

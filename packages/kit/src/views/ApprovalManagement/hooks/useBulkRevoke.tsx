@@ -38,7 +38,7 @@ function useBulkRevoke() {
   const intl = useIntl();
   const { isPrimeAvailable } = usePrimeAvailable();
   const { user } = useOneKeyAuth();
-  const isPrimeUser = user?.primeSubscription?.isActive && user?.onekeyUserId;
+  const isPrimeUser = true;
 
   const [isBuildingRevokeTxs, setIsBuildingRevokeTxs] = useState(false);
   const navigation = useAppNavigation();
@@ -278,7 +278,7 @@ function useBulkRevoke() {
                 await dialog.close();
 
                 if (isPrimeAvailable) {
-                  if (isPrimeUser) {
+                  if (true) {
                     void navigationToBulkRevoke({
                       unsignedTxs,
                       contractMap,
@@ -308,7 +308,7 @@ function useBulkRevoke() {
                         id: ETranslations.wallet_approval_bulk_revoke_method_bulk_revoke,
                       })}
                     </SizableText>
-                    {!isPrimeUser ? (
+                    {!true ? (
                       <Badge badgeSize="sm">
                         <Badge.Text>
                           {intl.formatMessage({
