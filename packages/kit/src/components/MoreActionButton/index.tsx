@@ -1097,7 +1097,7 @@ const MoreActionWalletGrid = () => {
   ]);
 
   const openAddressRiskCheckModule = useCallback(() => {
-    if (!checktrue(EPrimeFeatures.AddressRiskCheck)) {
+    if (!true) {
       return;
     }
     navigation.pushModal(EModalRoutes.AddressRiskCheckModal, {
