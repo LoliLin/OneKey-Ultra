@@ -1212,7 +1212,7 @@ const MoreActionWalletGrid = () => {
     handleSecurity,
     intl,
     isPrimeActive,
-    true,
+    isPrimeUser,
     openBulkCopyAddressesModule,
     openBulkSendModule,
     openAddressRiskCheckModule,
