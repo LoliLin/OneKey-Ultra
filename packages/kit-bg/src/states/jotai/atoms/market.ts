@@ -1,3 +1,10 @@
+import {
+  type ITradingViewNativeChartSettings,
+  type ITradingViewNativeIndicatorSettings,
+  createTradingViewNativeChartSettings,
+  createTradingViewNativeIndicatorSettings,
+} from '@onekeyhq/shared/types/tradingViewNative';
+
 import { EAtomNames } from '../atomNames';
 import { globalAtom } from '../utils';
 
@@ -69,5 +76,116 @@ export const {
   initialValue: {
     isWatchlistMode: false,
     spotNetworkId: '',
+  },
+});
+
+export type IMarketTradingViewStorageNamespace = 'market';
+
+export interface IMarketTradingViewSubIndicatorCountPersistAtom {
+  subIndicatorCountByStorageNamespace: Partial<
+    Record<IMarketTradingViewStorageNamespace, number>
+  >;
+}
+
+export const {
+  target: marketTradingViewSubIndicatorCountPersistAtom,
+  use: useMarketTradingViewSubIndicatorCountPersistAtom,
+} = globalAtom<IMarketTradingViewSubIndicatorCountPersistAtom>({
+  persist: true,
+  name: EAtomNames.marketTradingViewSubIndicatorCountPersistAtom,
+  initialValue: {
+    subIndicatorCountByStorageNamespace: {},
+  },
+});
+
+export const {
+  target: marketTradingViewChartSettingsPersistAtom,
+  use: useMarketTradingViewChartSettingsPersistAtom,
+} = globalAtom<ITradingViewNativeChartSettings>({
+  persist: true,
+  name: EAtomNames.marketTradingViewChartSettingsPersistAtom,
+  initialValue: createTradingViewNativeChartSettings(),
+});
+
+export const {
+  target: marketTradingViewIndicatorSettingsPersistAtom,
+  use: useMarketTradingViewIndicatorSettingsPersistAtom,
+} = globalAtom<ITradingViewNativeIndicatorSettings>({
+  persist: true,
+  name: EAtomNames.marketTradingViewIndicatorSettingsPersistAtom,
+  initialValue: createTradingViewNativeIndicatorSettings(),
+});
+
+export type IMarketDetailChartDisplayMode = 'simple' | 'pro';
+
+export interface IMarketDetailChartDisplayModePersistAtom {
+  mode: IMarketDetailChartDisplayMode;
+}
+
+export const {
+  target: marketDetailChartDisplayModePersistAtom,
+  use: useMarketDetailChartDisplayModePersistAtom,
+} = globalAtom<IMarketDetailChartDisplayModePersistAtom>({
+  persist: true,
+  name: EAtomNames.marketDetailChartDisplayModePersistAtom,
+  initialValue: { mode: 'simple' },
+});
+
+export type IMarketPriceSource = 'share' | 'token';
+
+export interface IMarketPriceSourceAtom {
+  source: IMarketPriceSource;
+}
+
+// Shared by the stock price header and chart. StockDesktopLayout resets this
+// non-persisted value to 'share' when the selected stock changes.
+export const { target: marketPriceSourceAtom, use: useMarketPriceSourceAtom } =
+  globalAtom<IMarketPriceSourceAtom>({
+    persist: false,
+    name: EAtomNames.marketPriceSourceAtom,
+    initialValue: { source: 'share' },
+  });
+
+export interface IMarketDesktopLayout {
+  chartHeight?: number;
+  chartHeightUpdateId?: string;
+}
+
+export const {
+  target: marketDesktopLayoutAtom,
+  use: useMarketDesktopLayoutAtom,
+} = globalAtom<IMarketDesktopLayout>({
+  name: EAtomNames.marketDesktopLayoutAtom,
+  persist: true,
+  initialValue: {},
+});
+
+export interface IMarketTradingViewPanelSettings {
+  chartSettings: ITradingViewNativeChartSettings;
+  indicatorSettings: ITradingViewNativeIndicatorSettings;
+}
+
+export interface IMarketTradingViewPanelSizes {
+  columns: number[];
+  rows: number[];
+}
+
+export interface IMarketTradingViewLayout {
+  panelCount: 1 | 2 | 3 | 4;
+  panelOrder: string[];
+  panelSettings: Record<string, IMarketTradingViewPanelSettings>;
+  panelSizes?: Record<string, IMarketTradingViewPanelSizes>;
+}
+
+export const {
+  target: marketTradingViewLayoutPersistAtom,
+  use: useMarketTradingViewLayoutPersistAtom,
+} = globalAtom<IMarketTradingViewLayout>({
+  persist: true,
+  name: EAtomNames.marketTradingViewLayoutPersistAtom,
+  initialValue: {
+    panelCount: 1,
+    panelOrder: ['main', 'panel-2', 'panel-3', 'panel-4'],
+    panelSettings: {},
   },
 });

@@ -1,5 +1,7 @@
 import { BackgroundServiceProxyBase } from '../../../apis/BackgroundServiceProxyBase';
 
+import { getXpubOrAddressFromAccountKey } from './simpleDbFacadeCompatibility';
+
 import type { SimpleDb } from './SimpleDb';
 import type { BackgroundApiProxyBase } from '../../../apis/BackgroundApiProxyBase';
 import type { SimpleDbEntityAccountSelector } from '../entity/SimpleDbEntityAccountSelector';
@@ -23,9 +25,9 @@ import type { SimpleDbEntityBTCFreshAddress } from '../entity/SimpleDbEntityBTCF
 import type { SimpleDbEntityBTCFreshAddressMeta } from '../entity/SimpleDbEntityBTCFreshAddressMeta';
 import type { SimpleDbEntityChainResource } from '../entity/SimpleDbEntityChainResource';
 import type { SimpleDbEntityChangeHistory } from '../entity/SimpleDbEntityChangeHistory';
+import type { SimpleDbEntityCloudBackupPasswordCache } from '../entity/SimpleDbEntityCloudBackupPasswordCache';
 import type { SimpleDbEntityCustomNetwork } from '../entity/SimpleDbEntityCustomNetwork';
 import type { SimpleDbEntityCustomRpc } from '../entity/SimpleDbEntityCustomRPC';
-import type { SimpleDbEntityCustomTokens } from '../entity/SimpleDbEntityCustomTokens';
 import type { SimpleDbEntityDappConnection } from '../entity/SimpleDbEntityDappConnection';
 import type { SimpleDbEntityDefaultWalletSettings } from '../entity/SimpleDbEntityDefaultWalletSettings';
 import type { SimpleDbEntityDeFi } from '../entity/SimpleDbEntityDeFi';
@@ -35,6 +37,7 @@ import type { SimpleDbEntityEarnOrders } from '../entity/SimpleDbEntityEarnOrder
 import type { SimpleDbEntityFeeInfo } from '../entity/SimpleDbEntityFeeInfo';
 import type { SimpleDbEntityFloatingIconDomainBlockList } from '../entity/SimpleDbEntityFloatingIconDomainBlockList';
 import type { SimpleDbEntityFloatingIconSettings } from '../entity/SimpleDbEntityFloatingIconSettings';
+import type { SimpleDbEntityHardwarePortfolioSync } from '../entity/SimpleDbEntityHardwarePortfolioSync';
 import type { SimpleDbEntityIpTable } from '../entity/SimpleDbEntityIpTable';
 import type { SimpleDbEntityLegacyWalletNames } from '../entity/SimpleDbEntityLegacyWalletNames';
 import type { SimpleDbEntityLightning } from '../entity/SimpleDbEntityLightning';
@@ -50,8 +53,8 @@ import type { SimpleDbEntityNotificationSettings } from '../entity/SimpleDbEntit
 import type { SimpleDbEntityPerp } from '../entity/SimpleDbEntityPerp';
 import type { SimpleDbEntityPrime } from '../entity/SimpleDbEntityPrime';
 import type { SimpleDbEntityPrimeTransfer } from '../entity/SimpleDbEntityPrimeTransfer';
+import type { SimpleDbEntityReceiveArrivalConfig } from '../entity/SimpleDbEntityReceiveArrivalConfig';
 import type { SimpleDbEntityRecentNetworks } from '../entity/SimpleDbEntityRecentNetworks';
-import type { SimpleDbEntityRecentRecipients } from '../entity/SimpleDbEntityRecentRecipients';
 import type { SimpleDbEntityReferralCode } from '../entity/SimpleDbEntityReferralCode';
 import type { SimpleDbEntityRiskTokenManagement } from '../entity/SimpleDbEntityRiskTokenManagement';
 import type { SimpleDbEntityRiskyTokens } from '../entity/SimpleDbEntityRiskyTokens';
@@ -85,6 +88,10 @@ export class SimpleDbProxy
   }
 
   prime = this._createProxyService('prime') as SimpleDbEntityPrime;
+
+  cloudBackupPasswordCache = this._createProxyService(
+    'cloudBackupPasswordCache',
+  ) as SimpleDbEntityCloudBackupPasswordCache;
 
   browserTabs = this._createProxyService(
     'browserTabs',
@@ -194,9 +201,9 @@ export class SimpleDbProxy
     'universalSearch',
   ) as SimpleDbEntityUniversalSearch;
 
-  customTokens = this._createProxyService(
-    'customTokens',
-  ) as SimpleDbEntityCustomTokens;
+  customTokens = this._createProxyService('customTokens', {
+    getXpubOrAddressFromAccountKey,
+  }) as SimpleDb['customTokens'];
 
   customRpc = this._createProxyService('customRpc') as SimpleDbEntityCustomRpc;
 
@@ -236,6 +243,10 @@ export class SimpleDbProxy
     'babylonSync',
   ) as SimpleDbEntityBabylonSync;
 
+  hardwarePortfolioSync = this._createProxyService(
+    'hardwarePortfolioSync',
+  ) as SimpleDbEntityHardwarePortfolioSync;
+
   appStatus = this._createProxyService('appStatus') as SimpleDbEntityAppStatus;
 
   allNetworks = this._createProxyService(
@@ -264,7 +275,11 @@ export class SimpleDbProxy
 
   recentRecipients = this._createProxyService(
     'recentRecipients',
-  ) as SimpleDbEntityRecentRecipients;
+  ) as SimpleDb['recentRecipients'];
+
+  transferRecipientsCache = this._createProxyService(
+    'transferRecipientsCache',
+  ) as SimpleDb['transferRecipientsCache'];
 
   riskTokenManagement = this._createProxyService(
     'riskTokenManagement',
@@ -289,6 +304,10 @@ export class SimpleDbProxy
   chainResource = this._createProxyService(
     'chainResource',
   ) as SimpleDbEntityChainResource;
+
+  receiveArrivalConfig = this._createProxyService(
+    'receiveArrivalConfig',
+  ) as SimpleDbEntityReceiveArrivalConfig;
 
   btcFreshAddress = this._createProxyService(
     'btcFreshAddress',

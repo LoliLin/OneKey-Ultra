@@ -5,6 +5,7 @@ import { debounce } from 'lodash';
 import { useIsOverlayPage } from '@onekeyhq/components';
 import { useRouteIsFocused as useIsFocused } from '@onekeyhq/kit/src/hooks/useRouteIsFocused';
 import { useSettingsAtom } from '@onekeyhq/kit-bg/src/states/jotai/atoms';
+import type { IAccountDeriveTypes } from '@onekeyhq/kit-bg/src/vaults/types';
 import platformEnv from '@onekeyhq/shared/src/platformEnv';
 import { ETabRoutes } from '@onekeyhq/shared/src/routes';
 import accountUtils from '@onekeyhq/shared/src/utils/accountUtils';
@@ -44,6 +45,8 @@ import {
 
 import {
   getSwapAddressAccountSelectorNum,
+  resolveSwapTargetNetworkAccount,
+  resolveSwapTargetNetworkAccountOnce,
   shouldResetSwapRecipientOnAccountNetworkSync,
   shouldShowSwapRecipientAddressInfo,
   shouldUseSwapCustomRecipientAddress,
@@ -277,6 +280,9 @@ export function useSwapAddressInfo(type: ESwapDirectionType) {
   const [accountForTargetNetwork, setAccountForTargetNetwork] = useState<
     INetworkAccount | undefined
   >(undefined);
+  const [deriveTypeForTargetNetwork, setDeriveTypeForTargetNetwork] = useState<
+    IAccountDeriveTypes | undefined
+  >(undefined);
   const [resolvedTargetNetworkAccountKey, setResolvedTargetNetworkAccountKey] =
     useState<string | undefined>(undefined);
 
@@ -377,37 +383,52 @@ export function useSwapAddressInfo(type: ESwapDirectionType) {
   useEffect(() => {
     let cancelled = false;
 
-    if (!shouldResolveTargetNetworkAccount || !tokenNetworkId) {
+    // The key is only defined while a target account has to be resolved.
+    if (
+      !shouldResolveTargetNetworkAccount ||
+      !tokenNetworkId ||
+      !targetNetworkAccountResolveKey
+    ) {
       setAccountForTargetNetwork(undefined);
+      setDeriveTypeForTargetNetwork(undefined);
       setResolvedTargetNetworkAccountKey(undefined);
       return;
     }
+    setDeriveTypeForTargetNetwork(undefined);
     setResolvedTargetNetworkAccountKey(undefined);
 
     void (async () => {
       try {
-        const targetDeriveType =
-          await backgroundApiProxy.serviceNetwork.getGlobalDeriveTypeOfNetwork({
-            networkId: tokenNetworkId,
-          });
-        const targetAccount =
-          await backgroundApiProxy.serviceAccount.getNetworkAccount({
-            deriveType: targetDeriveType,
-            indexedAccountId: activeAccount.indexedAccount?.id,
-            accountId: activeAccount.indexedAccount?.id
-              ? undefined
-              : activeAccount.account?.id,
-            dbAccount: activeAccount.dbAccount,
-            networkId: tokenNetworkId,
+        const { account: targetAccount, deriveType: targetDeriveType } =
+          await resolveSwapTargetNetworkAccountOnce({
+            key: targetNetworkAccountResolveKey,
+            resolve: () =>
+              resolveSwapTargetNetworkAccount({
+                getDeriveType: () =>
+                  backgroundApiProxy.serviceNetwork.getGlobalDeriveTypeOfNetwork(
+                    { networkId: tokenNetworkId },
+                  ),
+                getNetworkAccount: (deriveType) =>
+                  backgroundApiProxy.serviceAccount.getNetworkAccount({
+                    deriveType,
+                    indexedAccountId: activeAccount.indexedAccount?.id,
+                    accountId: activeAccount.indexedAccount?.id
+                      ? undefined
+                      : activeAccount.account?.id,
+                    dbAccount: activeAccount.dbAccount,
+                    networkId: tokenNetworkId,
+                  }),
+              }),
           });
         if (!cancelled) {
           setAccountForTargetNetwork(targetAccount);
+          setDeriveTypeForTargetNetwork(targetDeriveType);
           setResolvedTargetNetworkAccountKey(targetNetworkAccountResolveKey);
         }
       } catch (_e) {
         if (!cancelled) {
           setAccountForTargetNetwork(undefined);
-          setResolvedTargetNetworkAccountKey(targetNetworkAccountResolveKey);
+          setDeriveTypeForTargetNetwork(undefined);
         }
       }
     })();
@@ -430,11 +451,15 @@ export function useSwapAddressInfo(type: ESwapDirectionType) {
     const res: {
       address: undefined | string;
       networkId: undefined | string;
+      deriveType?: IAccountDeriveTypes;
       accountInfo: IAccountSelectorActiveAccountInfo | undefined;
       activeAccount: IAccountSelectorActiveAccountInfo | undefined;
       isAddressInfoReady: boolean;
     } = {
       networkId: undefined,
+      deriveType: shouldResolveTargetNetworkAccount
+        ? deriveTypeForTargetNetwork
+        : activeAccount.deriveType,
       address: undefined,
       accountInfo: undefined,
       activeAccount: undefined,
@@ -563,6 +588,7 @@ export function useSwapAddressInfo(type: ESwapDirectionType) {
     activeAccount,
     isAllNetwork,
     accountForTargetNetwork,
+    deriveTypeForTargetNetwork,
     isAddressInfoReady,
     tokenNetworkId,
     currentSelectNetwork?.networkId,

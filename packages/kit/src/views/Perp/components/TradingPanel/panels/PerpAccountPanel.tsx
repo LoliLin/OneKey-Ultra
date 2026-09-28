@@ -9,11 +9,11 @@ import {
   DebugRenderTracker,
   IconButton,
   SizableText,
+  Skeleton,
   Tooltip,
   XStack,
   YStack,
   useClipboard,
-  useInTabDialog,
 } from '@onekeyhq/components';
 import { openHyperLiquidExplorerUrl } from '@onekeyhq/kit/src/utils/explorerUtils';
 import {
@@ -27,10 +27,10 @@ import platformEnv from '@onekeyhq/shared/src/platformEnv';
 import accountUtils from '@onekeyhq/shared/src/utils/accountUtils';
 import { numberFormat } from '@onekeyhq/shared/src/utils/numberUtils';
 
+import { useShowDepositWithdrawModal } from '../../../hooks/useShowDepositWithdrawModal';
 import { useShowPortfolio } from '../../../hooks/useShowPortfolio';
 import { getPortfolioTitle } from '../../Portfolio/PerpPortfolioModal';
 import { PerpsAccountNumberValue } from '../components/PerpsAccountNumberValue';
-import { showDepositWithdrawDialog } from '../modals/DepositWithdrawModal';
 
 export function PerpAccountDebugInfo() {
   const [accountSummary] = usePerpsActiveAccountSummaryAtom();
@@ -49,7 +49,7 @@ export function PerpAccountDebugInfo() {
 }
 
 function PerpAccountMMRView() {
-  const [{ mmrPercent }] = usePerpsActiveAccountMmrAtom();
+  const [{ mmrPercent, status }] = usePerpsActiveAccountMmrAtom();
   const intl = useIntl();
   const mmrColor = (() => {
     const pct = parseFloat(mmrPercent ?? '0');
@@ -80,17 +80,23 @@ function PerpAccountMMRView() {
     [intl],
   );
 
-  if (mmrPercent) {
+  const isLoading = status === 'loading';
+  if (mmrPercent || isLoading) {
     return (
-      <XStack justifyContent="space-between">
+      <XStack justifyContent="space-between" alignItems="center">
         <Tooltip
           placement="top"
           renderContent={mmrTooltipContent}
           renderTrigger={mmrTooltipTrigger}
         />
-        <SizableText size="$bodySmMedium" color={mmrColor}>
-          {mmrPercent}%
-        </SizableText>
+        {isLoading ? (
+          // Sized like "00.00%" so the row does not shift when the value lands.
+          <Skeleton width={44} height={16} />
+        ) : (
+          <SizableText size="$bodySmMedium" color={mmrColor}>
+            {mmrPercent}%
+          </SizableText>
+        )}
       </XStack>
     );
   }
@@ -102,13 +108,11 @@ function PerpAccountPanel() {
   const [computedValue] = usePerpsComputedAccountValueAtom();
   const [selectedAccount] = usePerpsActiveAccountAtom();
   const userAddress = selectedAccount.accountAddress;
-  const dialogInTab = useInTabDialog();
   const intl = useIntl();
   const { copyText } = useClipboard();
   const { showPortfolio } = useShowPortfolio();
-  const isDepositDisabled = accountUtils.isWatchingAccount({
-    accountId: selectedAccount.accountId || '',
-  });
+  const { showDepositWithdrawModal, isDepositDisabled } =
+    useShowDepositWithdrawModal('accountPanel');
 
   const unrealizedPnlInfo = useMemo(() => {
     const pnlBn = new BigNumber(accountSummary?.totalUnrealizedPnl || '0');
@@ -275,17 +279,7 @@ function PerpAccountPanel() {
             h={36}
             variant="secondary"
             disabled={isDepositDisabled}
-            onPress={() =>
-              isDepositDisabled
-                ? undefined
-                : showDepositWithdrawDialog(
-                    {
-                      actionType: 'deposit',
-                    },
-                    dialogInTab,
-                    intl,
-                  )
-            }
+            onPress={() => void showDepositWithdrawModal('deposit')}
             alignItems="center"
             justifyContent="center"
             childrenAsText={false}
@@ -306,15 +300,7 @@ function PerpAccountPanel() {
             title={intl.formatMessage({
               id: ETranslations.perp_trade_withdraw,
             })}
-            onPress={() =>
-              showDepositWithdrawDialog(
-                {
-                  actionType: 'withdraw',
-                },
-                dialogInTab,
-                intl,
-              )
-            }
+            onPress={() => void showDepositWithdrawModal('withdraw')}
           />
           <IconButton
             testID="perp-icon-btn"

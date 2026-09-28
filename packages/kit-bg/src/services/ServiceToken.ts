@@ -5,10 +5,7 @@ import {
   backgroundClass,
   backgroundMethod,
 } from '@onekeyhq/shared/src/background/backgroundDecorators';
-import {
-  getListedNetworkMap,
-  getNetworkIdsMap,
-} from '@onekeyhq/shared/src/config/networkIds';
+import { getNetworkIdsMap } from '@onekeyhq/shared/src/config/networkIds';
 import { USD_CURRENCY_ID } from '@onekeyhq/shared/src/consts/currencyConsts';
 import { AGGREGATE_TOKEN_MOCK_NETWORK_ID } from '@onekeyhq/shared/src/consts/networkConsts';
 import {
@@ -22,12 +19,16 @@ import perfUtils, {
   EPerformanceTimerLogNames,
 } from '@onekeyhq/shared/src/utils/debug/perfUtils';
 import networkUtils from '@onekeyhq/shared/src/utils/networkUtils';
+import { applySharedBalanceExclusionToTokenGroups } from '@onekeyhq/shared/src/utils/sharedBalanceUtils';
 import timerUtils from '@onekeyhq/shared/src/utils/timerUtils';
+import tokenRebaseUtils from '@onekeyhq/shared/src/utils/tokenRebaseUtils';
+import { filterTokenSelectorTokenDataByDappTokenFilterParams } from '@onekeyhq/shared/src/utils/tokenSelectorFilterUtils';
 import {
   buildTokenSearchKeywordQueries,
   filterAccountTokenListByLimit,
   getEmptyTokenData,
   getMergedTokenData,
+  normalizeTokenSearchResults,
 } from '@onekeyhq/shared/src/utils/tokenUtils';
 import { EServiceEndpointEnum } from '@onekeyhq/shared/types/endpoint';
 import type {
@@ -239,6 +240,19 @@ class ServiceToken extends ServiceBase {
       ...rest
     } = params;
     const { networkId } = rest;
+
+    // All-network flows must fan out per real network before reaching this
+    // method; the wallet API always rejects the all-network mock id, so a
+    // direct request with it is a caller bug — drop it before the network layer.
+    if (networkUtils.isAllNetwork({ networkId })) {
+      defaultLogger.token.request.fetchAccountTokensBlockedAllNetworkRequest({
+        params,
+      });
+      return {
+        ...getEmptyTokenData(),
+        networkId,
+      };
+    }
 
     const isUrlAccount = accountUtils.isUrlAccountFn({ accountId });
 
@@ -472,6 +486,48 @@ class ServiceToken extends ServiceBase {
           mergeAssets: vaultSettings.mergeDeriveAssetsEnabled,
         };
       });
+
+    // Explicit custom contracts may still be returned when the wallet-token
+    // request excludes dApp tokens. Normalize the complete groups before
+    // cache and account-worth consumers see them.
+    const tokenSelectorFilterParams = {
+      withoutDappToken: rest.withoutDappToken,
+      withoutWalletToken: rest.withoutWalletToken,
+    };
+    resp.data.data.tokens = filterTokenSelectorTokenDataByDappTokenFilterParams(
+      {
+        tokenData: resp.data.data.tokens,
+        tokenSelectorFilterParams,
+      },
+    );
+    resp.data.data.riskTokens =
+      filterTokenSelectorTokenDataByDappTokenFilterParams({
+        tokenData: resp.data.data.riskTokens,
+        tokenSelectorFilterParams,
+      });
+    resp.data.data.smallBalanceTokens =
+      filterTokenSelectorTokenDataByDappTokenFilterParams({
+        tokenData: resp.data.data.smallBalanceTokens,
+        tokenSelectorFilterParams,
+      });
+    if (resp.data.data.allTokens) {
+      resp.data.data.allTokens =
+        filterTokenSelectorTokenDataByDappTokenFilterParams({
+          tokenData: resp.data.data.allTokens,
+          tokenSelectorFilterParams,
+        });
+    }
+
+    // Shared-balance groups (OK-63633, Arc native USDC vs ERC-20 0x3600…):
+    // resolve ONCE over the FILTERED tokens ∪ smallBalanceTokens which marked
+    // rows must be skipped by totals and flag their fiat-map entries. Runs
+    // after the selector filters so a marked row whose primary was filtered
+    // out is counted once instead of zero times. Rows are never dropped — the
+    // ERC-20 interface stays listed / swappable.
+    applySharedBalanceExclusionToTokenGroups({
+      tokens: resp.data.data.tokens,
+      smallBalanceTokens: resp.data.data.smallBalanceTokens,
+    });
 
     if (mergeTokens) {
       const { tokens, riskTokens, smallBalanceTokens } = resp.data.data as any;
@@ -739,16 +795,17 @@ class ServiceToken extends ServiceBase {
 
     const result = resp.data.data ?? [];
 
-    return result.map((item) => ({
-      ...item,
-      tokens: item.tokens.map((token) => ({
+    return result.map((item) => {
+      const tokens = item.tokens.map((token) => ({
         ...token,
         info: {
           ...token.info,
           networkId,
         },
-      })),
-    }));
+      }));
+      tokenRebaseUtils.normalizeTokenDetailItemsBalanceMultiplier(tokens);
+      return { ...item, tokens };
+    });
   }
 
   @backgroundMethod()
@@ -817,15 +874,42 @@ class ServiceToken extends ServiceBase {
       }
     }
 
+    // The dedupe key and the row `$key` must stay identical, so derive both
+    // from one builder. networkId is part of it because native tokens across
+    // chains share uniqueKey 'native' and an empty address: a bare
+    // `uniqueKey ?? address` collides and downstream $key-keyed maps
+    // (TokenListView tokenByKey) collapse them into one row.
+    const buildSearchTokenKey = (info: IToken) =>
+      `${info.networkId ?? ''}_${info.uniqueKey ?? info.address}`;
+
+    // Catalog for the delisted-network filter inside
+    // normalizeTokenSearchResults (OK-60860). The lookup is best-effort: a
+    // transient catalog failure must not discard the token queries that
+    // already succeeded, so fail open and skip the filter.
+    let availableNetworkIds: Set<string> | undefined;
+    try {
+      const { networks: availableNetworks } =
+        await this.backgroundApi.serviceNetwork.getAllNetworks();
+      availableNetworkIds = new Set(
+        availableNetworks.map((network) => network.id),
+      );
+    } catch {
+      availableNetworkIds = undefined;
+    }
+
+    // Normalize before deduping so the key sees the stamped networkId: a hit
+    // that omits it under a scoped request would otherwise collide across
+    // networks and, on press, fall back to the selector's own network.
     return uniqBy(
-      fulfilledResponses.flatMap((resp) => resp.data.data),
-      (item) =>
-        `${item.info.networkId ?? ''}_${
-          item.info.uniqueKey ?? item.info.address
-        }`,
+      normalizeTokenSearchResults({
+        items: fulfilledResponses.flatMap((resp) => resp.data.data),
+        requestNetworkId: networkId,
+        availableNetworkIds,
+      }),
+      (item) => buildSearchTokenKey(item.info),
     ).map((item) => ({
       ...item.info,
-      $key: item.info.uniqueKey ?? item.info.address,
+      $key: buildSearchTokenKey(item.info),
     }));
   }
 
@@ -1388,16 +1472,49 @@ class ServiceToken extends ServiceBase {
   public async getAllAggregateTokenInfo() {
     const rawData =
       await this.backgroundApi.simpleDb.aggregateToken.getRawData();
-    // Drop tokens on networks this build no longer bundles: the cached wallet
-    // config may have been persisted by an older app version whose preset
-    // network list included networks that were delisted since.
-    const listedNetworkMap = getListedNetworkMap();
+    // Drop tokens on networks this build no longer serves: the cached wallet
+    // config may have been persisted by an older app version whose network
+    // list included networks that were delisted since. Gate on the merged
+    // network registry, not the preset-only listed map: aggregate members may
+    // live on server-delivered chains (e.g. Robinhood) that presetNetworks
+    // never bundles, and ServiceSetting.syncWalletConfig applies the same
+    // registry gate at write time.
+    //
+    // The registry is only authoritative once the server-network record has
+    // been filled: getServerNetworks() returns an empty list while that record
+    // is unfilled (it only kicks a background refresh) or unreadable (storage
+    // errors are swallowed), and getAllNetworks() then resolves with presets
+    // only, which would silently drop every server-delivered member. Probe the
+    // record first and fail open (skip the filter) when it is unfilled or
+    // unreadable. The write path awaits the fill instead; this runs on the
+    // token-list hot path and must not block on a network request.
+    let eligibleNetworkIds: Set<string> | undefined;
+    try {
+      const registryFilled =
+        await this.backgroundApi.serviceCustomRpc.isServerNetworkRegistryFilled();
+      if (registryFilled) {
+        const { networks: eligibleNetworks } =
+          await this.backgroundApi.serviceNetwork.getAllNetworks({
+            excludeCustomNetwork: true,
+            excludeAllNetworkItem: true,
+          });
+        eligibleNetworkIds = new Set(eligibleNetworks.map((n) => n.id));
+      } else {
+        // Kick the fill so the next read is gated; single-flight and
+        // fetch failures are swallowed inside.
+        void this.backgroundApi.serviceCustomRpc.ensureServerNetworksFetched();
+      }
+    } catch {
+      eligibleNetworkIds = undefined;
+    }
     const allAggregateTokenMap: Record<string, { tokens: IAccountToken[] }> =
       {};
     Object.entries(rawData?.allAggregateTokenMap ?? {}).forEach(
       ([key, value]) => {
         const tokens = value.tokens.filter(
-          (token) => token.networkId && listedNetworkMap[token.networkId],
+          (token) =>
+            !!token.networkId &&
+            (!eligibleNetworkIds || eligibleNetworkIds.has(token.networkId)),
         );
         if (tokens.length > 0) {
           allAggregateTokenMap[key] = { tokens };

@@ -5,19 +5,6 @@ on:
   pull_request:
     branches:
       - x
-    paths:
-      - '.github/workflows/startup-graph-budget.yml'
-      - 'packages/**'
-      - 'apps/mobile/**'
-      - 'apps/web/**'
-      - 'development/babel-plugins/**'
-      - 'development/perf-ci/run-web-cold.js'
-      - 'development/perf-ci/lib/**'
-      - 'development/perf-ci/thresholds/web.cold.json'
-      - 'development/rspack/**'
-      - 'development/webpack/**'
-      - 'package.json'
-      - 'yarn.lock'
 
 # Cancel previous runs for the same PR
 concurrency:
@@ -35,31 +22,57 @@ jobs:
   # Runs unionBuild to produce allocation reports, then validates
   # forbidden packages, module budgets, and architectural rules.
   native-startup-graph-budget:
-    name: Native startup graph budget
+    name: Native
     runs-on: ubuntu-24.04
-
-    strategy:
-      matrix:
-        node-version: [24.x]
+    timeout-minutes: 14
 
     steps:
       - uses: actions/checkout@v4
         with:
           lfs: true
 
-      - name: Use Node.js ${{ matrix.node-version }}
+      - name: Use Node.js 24.x
         uses: actions/setup-node@v6
         with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'yarn'
+          node-version: 24.x
+          package-manager-cache: false
+          check-latest: true
           registry-url: 'https://npm.pkg.github.com'
           scope: '@onekeyhq'
 
+      - name: Locate Yarn cache
+        id: yarn-cache
+        shell: bash
+        run: |
+          node <<'NODE'
+          // Match the repository's Yarn 4 cache path without executing checkout plugins.
+          const fs = require('node:fs');
+          const os = require('node:os');
+          const path = require('node:path');
+          const base = process.platform === 'win32'
+            ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Yarn', 'Berry')
+            : process.env.XDG_DATA_HOME
+              ? path.join(process.env.XDG_DATA_HOME, 'yarn', 'berry')
+              : path.join(os.homedir(), '.yarn', 'berry');
+          const cache = process.env.YARN_ENABLE_GLOBAL_CACHE === 'true'
+            ? path.join(base, 'cache') : path.join(process.env.GITHUB_WORKSPACE, '.yarn', 'cache');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `path=${cache}\narch=${process.arch}\n`);
+          NODE
+
+      - name: Restore Yarn cache from x
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.yarn-cache.outputs.path }}
+          key: node-cache-${{ runner.os }}-${{ steps.yarn-cache.outputs.arch }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            node-cache-${{ runner.os }}-${{ steps.yarn-cache.outputs.arch }}-yarn-
+
       - name: Install Dependencies
+        id: dependencies
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_OPTIONS: '--max_old_space_size=8192'
-        run: yarn install --immutable
+        uses: ./.github/actions/install-dependencies
 
       - name: Union Build (three-bundle split)
         env:
@@ -83,9 +96,11 @@ jobs:
           NODE_OPTIONS: '--max_old_space_size=8192'
           ENABLE_NATIVE_BACKGROUND_THREAD: 'true'
           ENTRY: main
-          # main entry currently: ~2552 modules / ~12.72 MB
+          # main entry currently: ~2666 modules / ~13.7 MB
+          # (AsyncStorage->MMKV migration adds the main-runtime bootstrap gate
+          # and runtime-owned MMKV instance/guard modules to the eager graph)
           STARTUP_MODULE_BUDGET: '3000'
-          STARTUP_SIZE_BUDGET_MB: '13.5'
+          STARTUP_SIZE_BUDGET_MB: '13.8'
         run: node apps/mobile/scripts/check-startup-graph-budget.js
 
       - name: Budget Check (background entry)
@@ -93,9 +108,10 @@ jobs:
           NODE_OPTIONS: '--max_old_space_size=8192'
           ENABLE_NATIVE_BACKGROUND_THREAD: 'true'
           ENTRY: background
-          # background entry currently: ~2458 modules / ~19.60 MB
+          # background entry currently: ~2377 modules / ~19.21 MB
+          # (hardware SDK 1.2.0 Pro2/Neo mainline; matches hotfix/v6.5.2's 19.5 budget)
           STARTUP_MODULE_BUDGET: '2600'
-          STARTUP_SIZE_BUDGET_MB: '19.8'
+          STARTUP_SIZE_BUDGET_MB: '19.5'
         run: node apps/mobile/scripts/check-startup-graph-budget.js
 
       - name: Architecture Check (three-bundle rules)
@@ -113,32 +129,62 @@ jobs:
             apps/mobile/out-dir-analysis/budget-check-ai-hints-*.md
           retention-days: 30
 
-  web-startup-graph-budget:
-    name: Web startup graph budget
-    runs-on: ubuntu-24.04
+      - name: Unmount dependency image
+        if: always() && steps.dependencies.outcome != 'skipped'
+        run: python3 .github/scripts/ci-dependencies.py cleanup
 
-    strategy:
-      matrix:
-        node-version: [24.x]
+  web-startup-graph-budget:
+    name: Web
+    runs-on: ubuntu-24.04
+    timeout-minutes: 14
 
     steps:
       - uses: actions/checkout@v4
         with:
           lfs: true
 
-      - name: Use Node.js ${{ matrix.node-version }}
+      - name: Use Node.js 24.x
         uses: actions/setup-node@v6
         with:
-          node-version: ${{ matrix.node-version }}
-          cache: 'yarn'
+          node-version: 24.x
+          package-manager-cache: false
+          check-latest: true
           registry-url: 'https://npm.pkg.github.com'
           scope: '@onekeyhq'
 
+      - name: Locate Yarn cache
+        id: yarn-cache
+        shell: bash
+        run: |
+          node <<'NODE'
+          // Match the repository's Yarn 4 cache path without executing checkout plugins.
+          const fs = require('node:fs');
+          const os = require('node:os');
+          const path = require('node:path');
+          const base = process.platform === 'win32'
+            ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Yarn', 'Berry')
+            : process.env.XDG_DATA_HOME
+              ? path.join(process.env.XDG_DATA_HOME, 'yarn', 'berry')
+              : path.join(os.homedir(), '.yarn', 'berry');
+          const cache = process.env.YARN_ENABLE_GLOBAL_CACHE === 'true'
+            ? path.join(base, 'cache') : path.join(process.env.GITHUB_WORKSPACE, '.yarn', 'cache');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `path=${cache}\narch=${process.arch}\n`);
+          NODE
+
+      - name: Restore Yarn cache from x
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.yarn-cache.outputs.path }}
+          key: node-cache-${{ runner.os }}-${{ steps.yarn-cache.outputs.arch }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            node-cache-${{ runner.os }}-${{ steps.yarn-cache.outputs.arch }}-yarn-
+
       - name: Install Dependencies
+        id: dependencies
         env:
           NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NODE_OPTIONS: '--max_old_space_size=8192'
-        run: yarn install --immutable
+        uses: ./.github/actions/install-dependencies
 
       # Current GitHub Actions cold-entry median baseline, measured on
       # ubuntu-24.04 with 3 fresh-browser runs in PR #12286 run 28733529052.
@@ -207,3 +253,156 @@ jobs:
             apps/web/out-dir-analysis/web-cold-budget-report-ai-hints.json
             apps/web/out-dir-analysis/web-cold-budget-report-ai-hints.md
           retention-days: 30
+
+      - name: Unmount dependency image
+        if: always() && steps.dependencies.outcome != 'skipped'
+        run: python3 .github/scripts/ci-dependencies.py cleanup
+
+  desktop-startup-budget:
+    name: Desktop
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+          package-manager-cache: false
+          check-latest: true
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@onekeyhq'
+
+      - name: Locate Yarn cache
+        id: yarn-cache
+        shell: bash
+        run: |
+          node <<'NODE'
+          // Match the repository's Yarn 4 cache path without executing checkout plugins.
+          const fs = require('node:fs');
+          const os = require('node:os');
+          const path = require('node:path');
+          const base = process.platform === 'win32'
+            ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Yarn', 'Berry')
+            : process.env.XDG_DATA_HOME
+              ? path.join(process.env.XDG_DATA_HOME, 'yarn', 'berry')
+              : path.join(os.homedir(), '.yarn', 'berry');
+          const cache = process.env.YARN_ENABLE_GLOBAL_CACHE === 'true'
+            ? path.join(base, 'cache') : path.join(process.env.GITHUB_WORKSPACE, '.yarn', 'cache');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `path=${cache}\narch=${process.arch}\n`);
+          NODE
+
+      - name: Restore Yarn cache from x
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.yarn-cache.outputs.path }}
+          key: node-cache-${{ runner.os }}-${{ steps.yarn-cache.outputs.arch }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            node-cache-${{ runner.os }}-${{ steps.yarn-cache.outputs.arch }}-yarn-
+
+      - name: Install Dependencies
+        id: dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_OPTIONS: '--max_old_space_size=8192'
+        uses: ./.github/actions/install-dependencies
+
+      - name: Build desktop renderer budget artifact with release Rspack config
+        env:
+          NODE_OPTIONS: '--max_old_space_size=8192'
+        run: yarn workspace @onekeyhq/desktop build:renderer:startup-budget
+
+      - name: Check desktop renderer startup graph budget
+        env:
+          NODE_OPTIONS: '--max_old_space_size=8192'
+        run: yarn workspace @onekeyhq/desktop check:renderer-startup-budget web-build
+
+      - name: Build desktop main with esbuild metafile
+        env:
+          ESBUILD_METAFILE: '1'
+          NODE_ENV: production
+        run: yarn workspace @onekeyhq/desktop build:main
+
+      - name: Check desktop main/preload bundle budget
+        run: yarn workspace @onekeyhq/desktop check:main-bundle-budget
+
+      - name: Upload desktop startup budget reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-startup-budget-reports
+          path: |
+            apps/desktop/out-dir-analysis/desktop-renderer-startup-graph-budget-report.json
+            apps/desktop/out-dir-analysis/desktop-main-bundle-budget-report.json
+            apps/desktop/app/dist/meta.json
+          retention-days: 30
+
+      - name: Unmount dependency image
+        if: always() && steps.dependencies.outcome != 'skipped'
+        run: python3 .github/scripts/ci-dependencies.py cleanup
+
+  ext-build-budget:
+    name: Extension
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+
+      - name: Use Node.js 24.x
+        uses: actions/setup-node@v6
+        with:
+          node-version: 24.x
+          package-manager-cache: false
+          check-latest: true
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@onekeyhq'
+
+      - name: Locate Yarn cache
+        id: yarn-cache
+        shell: bash
+        run: |
+          node <<'NODE'
+          // Match the repository's Yarn 4 cache path without executing checkout plugins.
+          const fs = require('node:fs');
+          const os = require('node:os');
+          const path = require('node:path');
+          const base = process.platform === 'win32'
+            ? path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'Yarn', 'Berry')
+            : process.env.XDG_DATA_HOME
+              ? path.join(process.env.XDG_DATA_HOME, 'yarn', 'berry')
+              : path.join(os.homedir(), '.yarn', 'berry');
+          const cache = process.env.YARN_ENABLE_GLOBAL_CACHE === 'true'
+            ? path.join(base, 'cache') : path.join(process.env.GITHUB_WORKSPACE, '.yarn', 'cache');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `path=${cache}\narch=${process.arch}\n`);
+          NODE
+
+      - name: Restore Yarn cache from x
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ steps.yarn-cache.outputs.path }}
+          key: node-cache-${{ runner.os }}-${{ steps.yarn-cache.outputs.arch }}-yarn-${{ hashFiles('yarn.lock') }}
+          restore-keys: |
+            node-cache-${{ runner.os }}-${{ steps.yarn-cache.outputs.arch }}-yarn-
+
+      - name: Install Dependencies
+        id: dependencies
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NODE_OPTIONS: '--max_old_space_size=8192'
+        uses: ./.github/actions/install-dependencies
+
+      - name: Check extension production build budgets
+        env:
+          NODE_OPTIONS: '--max_old_space_size=8192'
+        run: yarn app:ext:build
+
+      - name: Unmount dependency image
+        if: always() && steps.dependencies.outcome != 'skipped'
+        run: python3 .github/scripts/ci-dependencies.py cleanup

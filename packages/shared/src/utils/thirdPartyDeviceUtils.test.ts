@@ -74,6 +74,61 @@ describe('thirdPartyDeviceUtils', () => {
     });
   });
 
+  it('reads persisted Trezor identity and settings from snake_case features', () => {
+    const utils = thirdPartyDeviceUtils as unknown as {
+      getDeviceId?: (features: Record<string, unknown>) => string | undefined;
+      getDeviceState?: (params: {
+        features: Record<string, unknown>;
+      }) => Record<string, unknown>;
+    };
+    const features = {
+      device_id: 'TREZOR-DEVICE-ID',
+      auto_lock_delay_ms: 600_000,
+      haptic_feedback: true,
+      initialized: true,
+      passphrase_protection: true,
+      unlocked: false,
+    };
+
+    expect(utils.getDeviceId?.(features)).toBe('TREZOR-DEVICE-ID');
+    expect(utils.getDeviceState?.({ features })).toEqual({
+      autoLockDelayMs: 600_000,
+      autoShutDownDelayMs: 600_000,
+      hapticFeedback: true,
+      initialized: true,
+      passphraseProtection: true,
+      unlocked: false,
+    });
+  });
+
+  it('keeps camelCase compatibility for already-normalized features', () => {
+    const utils = thirdPartyDeviceUtils as unknown as {
+      getDeviceId?: (features: Record<string, unknown>) => string | undefined;
+      getDeviceState?: (params: {
+        features: Record<string, unknown>;
+      }) => Record<string, unknown>;
+    };
+    const features = {
+      deviceId: 'NORMALIZED-DEVICE-ID',
+      autoLockDelayMs: 30_000,
+      autoShutdownDelayMs: 60_000,
+      hapticFeedback: false,
+      initialized: false,
+      passphraseProtection: false,
+      unlocked: true,
+    };
+
+    expect(utils.getDeviceId?.(features)).toBe('NORMALIZED-DEVICE-ID');
+    expect(utils.getDeviceState?.({ features })).toEqual({
+      autoLockDelayMs: 30_000,
+      autoShutDownDelayMs: 60_000,
+      hapticFeedback: false,
+      initialized: false,
+      passphraseProtection: false,
+      unlocked: true,
+    });
+  });
+
   it('reads third-party firmware versions from settings before features', () => {
     expect(
       thirdPartyDeviceUtils.getDeviceVersion({
@@ -238,6 +293,11 @@ describe('thirdPartyDeviceUtils', () => {
     }
   });
 
+  // Exempt from the test-integrity source-text rule, see
+  // development/lint/test-integrity.allowlist.json. Absence of an import from a
+  // module that ships in every platform's main bundle is a property of the
+  // module graph, and the test's own parity check above deliberately imports
+  // the SDK, so nothing observable at runtime can stand in for it.
   it('keeps the adapter SDK out of the runtime import graph', () => {
     // The whole point of the local copy: thirdPartyDeviceUtils is pulled into
     // every platform's main bundle, and a runtime import of

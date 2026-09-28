@@ -4,6 +4,7 @@ import type { IEncodedTx } from '@onekeyhq/core/src/types';
 import type { ITransferInfo } from '@onekeyhq/kit-bg/src/vaults/types';
 import { calculateFeeForSend } from '@onekeyhq/shared/src/utils/feeUtils';
 import networkUtils from '@onekeyhq/shared/src/utils/networkUtils';
+import { equalTokenNoCaseSensitive } from '@onekeyhq/shared/src/utils/tokenUtils';
 import type { IFeeInfoUnit } from '@onekeyhq/shared/types/fee';
 import type {
   IQuoteResultFeeOtherFeeInfo,
@@ -12,6 +13,8 @@ import type {
 } from '@onekeyhq/shared/types/swap/types';
 
 import backgroundApiProxy from '../../../background/instance/backgroundApiProxy';
+
+import { isSwapGasSponsored } from './swapGasUtils';
 
 type ISwapLatestBalanceCheckParams = {
   token: ISwapToken;
@@ -23,6 +26,8 @@ type ISwapLatestBalanceCheckParams = {
 export type ISwapLatestBalanceCheckResult =
   | {
       isSufficient: true;
+      balance?: string;
+      tokenSymbol?: string;
     }
   | {
       isSufficient: false;
@@ -30,6 +35,71 @@ export type ISwapLatestBalanceCheckResult =
       requiredAmount: string;
       tokenSymbol: string;
     };
+
+export function checkSwapBalanceSufficientFromAmount({
+  balance,
+  amount,
+  tokenSymbol,
+}: {
+  balance: string;
+  amount: string;
+  tokenSymbol: string;
+}): ISwapLatestBalanceCheckResult {
+  const amountBN = new BigNumber(amount);
+  if (amountBN.gt(balance)) {
+    return {
+      isSufficient: false,
+      balance,
+      requiredAmount: amountBN.toFixed(),
+      tokenSymbol,
+    };
+  }
+  return { isSufficient: true, balance, tokenSymbol };
+}
+
+export function getSwapQuoteBalanceRequirements({
+  fromToken,
+  fromAmount,
+  otherFeeInfos,
+}: {
+  fromToken: ISwapToken;
+  fromAmount?: string;
+  otherFeeInfos?: IQuoteResultFeeOtherFeeInfo[];
+}) {
+  const requirements: {
+    token: ISwapToken;
+    amount: string;
+    reserveAmount?: string;
+  }[] = [{ token: fromToken, amount: fromAmount ?? '' }];
+
+  for (const feeInfo of otherFeeInfos ?? []) {
+    const feeAmount = toFiniteNonNegativeBigNumber(feeInfo.amount);
+    if (feeAmount) {
+      const existing = requirements.find((item) =>
+        equalTokenNoCaseSensitive({
+          token1: item.token,
+          token2: feeInfo.token,
+        }),
+      );
+      if (existing) {
+        existing.amount = new BigNumber(existing.amount)
+          .plus(feeAmount)
+          .toFixed();
+        existing.reserveAmount = new BigNumber(existing.reserveAmount ?? 0)
+          .plus(feeAmount)
+          .toFixed();
+      } else {
+        requirements.push({
+          token: feeInfo.token,
+          amount: feeAmount.toFixed(),
+          reserveAmount: feeAmount.toFixed(),
+        });
+      }
+    }
+  }
+
+  return requirements;
+}
 
 function toFiniteNonNegativeBigNumber(value?: string) {
   const valueBN = new BigNumber(value ?? '');
@@ -60,7 +130,7 @@ export function getSwapSafeInputBalanceAmount({
   return toFiniteNonNegativeBigNumber(fallbackBalance);
 }
 
-async function getSwapTokenBalanceContractAddress(token: ISwapToken) {
+export async function getSwapTokenBalanceContractAddress(token: ISwapToken) {
   if (!token.isNative || token.contractAddress) {
     return token.contractAddress ?? '';
   }
@@ -242,7 +312,7 @@ export function validateSwapBtcOutputs({
   return undefined;
 }
 
-function buildNativeTokenFromGasInfo({
+export function buildNativeTokenFromGasInfo({
   gasInfo,
   networkId,
   fromToken,
@@ -299,11 +369,7 @@ export function getSwapRequiredNativeBalanceAmount({
     // toward the user's required native balance. estimate-fee only sets these
     // flags when sponsorship is actually available, so the original
     // insufficient-gas block still applies whenever sponsorship is off.
-    if (
-      item.gasInfo.gasAccountEligible ||
-      item.gasInfo.megafuelEligible?.sponsorable ||
-      item.gasInfo.payer === 'megafuel'
-    ) {
+    if (isSwapGasSponsored(item.gasInfo)) {
       return acc;
     }
 
@@ -378,11 +444,12 @@ export async function checkSwapLatestBalanceSufficient({
     !accountAddress ||
     amountBN.isNaN() ||
     !amountBN.isFinite() ||
-    amountBN.lte(0)
+    amountBN.lt(0)
   ) {
     return { isSufficient: true };
   }
 
+  let balance: string | undefined;
   try {
     const contractAddress = await getSwapTokenBalanceContractAddress(token);
     const tokenBalanceInfo =
@@ -393,26 +460,23 @@ export async function checkSwapLatestBalanceSufficient({
         accountId,
         currency: 'usd',
       });
-    if (!tokenBalanceInfo?.length) {
-      return { isSufficient: true };
-    }
-
-    const balanceBN = new BigNumber(tokenBalanceInfo[0].balanceParsed ?? 0);
-    if (balanceBN.isNaN() || !balanceBN.isFinite()) {
-      return { isSufficient: true };
-    }
-
-    if (amountBN.gt(balanceBN)) {
-      return {
-        isSufficient: false,
-        balance: balanceBN.toFixed(),
-        requiredAmount: amountBN.toFixed(),
-        tokenSymbol: token.symbol,
-      };
+    const balanceBN = new BigNumber(
+      tokenBalanceInfo?.[0]?.balanceParsed ?? NaN,
+    );
+    if (!balanceBN.isNaN() && balanceBN.isFinite() && !balanceBN.isNegative()) {
+      balance = balanceBN.toFixed();
     }
   } catch (error) {
     console.error('checkSwapLatestBalanceSufficient error', error);
   }
 
-  return { isSufficient: true };
+  if (balance === undefined) {
+    return { isSufficient: true };
+  }
+
+  return checkSwapBalanceSufficientFromAmount({
+    balance,
+    amount,
+    tokenSymbol: token.symbol,
+  });
 }

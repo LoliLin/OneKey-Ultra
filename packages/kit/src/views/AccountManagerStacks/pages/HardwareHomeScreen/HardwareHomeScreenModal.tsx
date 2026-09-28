@@ -43,7 +43,10 @@ import type {
 } from '@onekeyhq/shared/src/routes';
 import deviceHomeScreenUtils from '@onekeyhq/shared/src/utils/deviceHomeScreenUtils';
 import deviceUtils from '@onekeyhq/shared/src/utils/deviceUtils';
-import imageUtils from '@onekeyhq/shared/src/utils/imageUtils';
+import { isProtocolV2ProductType } from '@onekeyhq/shared/src/utils/hardwareDeviceTypes';
+import imageUtils, {
+  type IResizeImageResult,
+} from '@onekeyhq/shared/src/utils/imageUtils';
 import { generateUUID } from '@onekeyhq/shared/src/utils/miscUtils';
 import type { IDeviceHomeScreen } from '@onekeyhq/shared/types/device';
 
@@ -122,6 +125,7 @@ function HomeScreenImageItem({
 
   return (
     <XStack
+      testID={`hardware-wallpaper-${item.wallpaperType || 'custom'}-${item.id}`}
       position="relative"
       flexBasis={aspectRatioInfo.flexBasis}
       borderWidth={4}
@@ -209,7 +213,7 @@ function HomeScreenImageItem({
             bottom="$1.5"
             zIndex={100}
             // backgroundColor="$bg"
-            animation="quick"
+            transition="quick"
             animateOnly={ANIMATE_ONLY_OPACITY_TRANSFORM}
             enterStyle={
               platformEnv.isNativeAndroid
@@ -242,7 +246,7 @@ function HomeScreenImageItem({
             zIndex={101}
             borderRadius="$full"
             backgroundColor="$bg"
-            animation="quick"
+            transition="quick"
             animateOnly={ANIMATE_ONLY_OPACITY_TRANSFORM}
             enterStyle={
               platformEnv.isNativeAndroid
@@ -466,22 +470,37 @@ function WallpaperCustomCategorySection({
 
     const imgBase64: string = data.data;
 
-    const img = await imageUtils.resizeImage({
-      uri: imgBase64,
+    let img: IResizeImageResult | undefined;
+    try {
+      img = await imageUtils.resizeImage({
+        uri: imgBase64,
 
-      width: config.size?.width,
-      height: config.size?.height,
+        width: config.size?.width,
+        height: config.size?.height,
 
-      originW,
-      originH,
-      isMonochrome,
-    });
+        originW,
+        originH,
+        isMonochrome,
+      });
+    } catch {
+      img = undefined;
+    }
+
+    // Reject failed conversions before they create empty cache entries.
+    if (!img?.base64) {
+      Toast.error({
+        title: intl.formatMessage({
+          id: ETranslations.hardware_wallpaper_crop_failed__msg,
+        }),
+      });
+      return;
+    }
 
     const name = `${USER_UPLOAD_IMG_NAME_PREFIX}${generateUUID()}`;
 
     UploadedHomeScreenCache.saveCache(device.id, {
       deviceId: device.id,
-      imgBase64: img?.base64 ?? '',
+      imgBase64: img.base64,
       name,
     });
 
@@ -617,7 +636,7 @@ export default function HardwareHomeScreenModal({
     if ([EDeviceType.Touch].includes(deviceType)) {
       canUpload = true;
     }
-    if ([EDeviceType.Pro].includes(deviceType)) {
+    if (deviceType === EDeviceType.Pro || isProtocolV2ProductType(deviceType)) {
       canUpload = true;
     }
 
@@ -637,10 +656,10 @@ export default function HardwareHomeScreenModal({
     isLoadingError: boolean;
   }>(
     async () => {
-      const { getDeviceFirmwareVersion, getDeviceUUID } = await CoreSDKLoader();
+      const { getDeviceFirmwareVersion } = await CoreSDKLoader();
 
       const serialNumber = device?.featuresInfo
-        ? getDeviceUUID(device.featuresInfo)
+        ? (deviceUtils.getDeviceSerialNoFromFeatures(device.featuresInfo) ?? '')
         : '';
 
       const firmwareVersion = device?.featuresInfo
@@ -693,12 +712,12 @@ export default function HardwareHomeScreenModal({
     );
 
     const categories: IWallpaperCategory[] = [];
+    const shouldShowDefaultWallpapers = deviceInfo?.deviceType
+      ? !deviceUtils.isTouchDevice(deviceInfo.deviceType) ||
+        isProtocolV2ProductType(deviceInfo.deviceType)
+      : false;
 
-    if (
-      defaultWallpapers.length > 0 &&
-      deviceInfo?.deviceType &&
-      !deviceUtils.isTouchDevice(deviceInfo?.deviceType)
-    ) {
+    if (defaultWallpapers.length > 0 && shouldShowDefaultWallpapers) {
       categories.push({
         title: intl.formatMessage({
           id: ETranslations.global_wallpaper_collection,
@@ -768,7 +787,7 @@ export default function HardwareHomeScreenModal({
       <Page.Header
         title={intl.formatMessage({ id: ETranslations.global_wallpaper })}
       />
-      <Page.Body px="$4">
+      <Page.Body px="$4" testID="hardware-wallpaper-page">
         <YStack gap="$2" py="$2">
           <WallpaperCustomCategorySection
             device={device}
@@ -790,8 +809,16 @@ export default function HardwareHomeScreenModal({
         confirmButtonProps={{
           disabled: !selectedItem || isUploadLoading,
           loading: isUploadLoading,
+          testID: 'hardware-wallpaper-apply-button',
         }}
-        onConfirm={async (_close) => {
+        onConfirm={async (close) => {
+          const applyStartedAt = Date.now();
+          const isProtocolV2Wallpaper = isProtocolV2ProductType(
+            device?.deviceType,
+          );
+          let isCustomScreen = false;
+          let hardwareCallStartedAt: number | undefined;
+          let hardwareCallMs: number | undefined;
           try {
             if (!device?.id || !selectedItem) {
               return;
@@ -807,11 +834,12 @@ export default function HardwareHomeScreenModal({
               isUserUpload,
             } = selectedItem;
 
-            const isCustomScreen = resType === 'custom' || isUserUpload;
+            isCustomScreen = resType === 'custom' || !!isUserUpload;
 
             let buildCustomHexError: string | undefined = '';
 
             let finallyScreenHex = '';
+            let finallyScreenBase64: string | undefined;
             let finallyThumbnailHex: string | undefined;
             let finallyBlurScreenHex: string | undefined;
             try {
@@ -820,6 +848,7 @@ export default function HardwareHomeScreenModal({
                 // case 2: server custom wallpaper from url
                 const {
                   screenHex: customScreenHex,
+                  screenBase64: customScreenBase64,
                   thumbnailHex: customThumbnailHex,
                   blurScreenHex: customBlurScreenHex,
                 } = await deviceHomeScreenUtils.buildCustomScreenHex({
@@ -831,10 +860,12 @@ export default function HardwareHomeScreenModal({
                 });
 
                 finallyScreenHex = customScreenHex || '';
+                finallyScreenBase64 = customScreenBase64;
                 finallyThumbnailHex = customThumbnailHex;
                 finallyBlurScreenHex = customBlurScreenHex;
               } else {
                 finallyScreenHex = screenHex || nameHex || '';
+                finallyScreenBase64 = selectedItem.screenBase64;
                 finallyThumbnailHex = thumbnailHex;
                 finallyBlurScreenHex = blurScreenHex;
               }
@@ -861,17 +892,22 @@ export default function HardwareHomeScreenModal({
               throw new OneKeyLocalError(buildCustomHexError);
             }
 
+            hardwareCallStartedAt = Date.now();
             const response =
               await backgroundApiProxy.serviceHardware.setDeviceHomeScreen({
                 dbDeviceId: device?.id,
                 screenItem: {
                   ...selectedItem,
                   screenHex: finallyScreenHex,
+                  screenBase64: finallyScreenBase64,
                   thumbnailHex: finallyThumbnailHex,
                   blurScreenHex: finallyBlurScreenHex,
                 },
               });
-            // setSelectedItem(undefined);
+            hardwareCallMs = Date.now() - hardwareCallStartedAt;
+            if (device.deviceType !== EDeviceType.Pro) {
+              close();
+            }
             Toast.success({
               title: intl.formatMessage({
                 id: ETranslations.hardware_wallpaper_add_success,
@@ -882,9 +918,47 @@ export default function HardwareHomeScreenModal({
                     id: ETranslations.hardware_wallpaper_add_success_information,
                   }),
             });
-            // Do not close the current page, let the user switch wallpapers and preview them on the device
-            // close();
+            if (isProtocolV2Wallpaper) {
+              defaultLogger.hardware.homescreen.wallpaperApply({
+                deviceType: device.deviceType,
+                isCustomScreen,
+                status: 'success',
+                totalDurationMs: Date.now() - applyStartedAt,
+                hardwareCallMs,
+                uploadSizeBytes:
+                  'size' in response && typeof response.size === 'number'
+                    ? response.size
+                    : undefined,
+              });
+            }
           } catch (error) {
+            if (isProtocolV2Wallpaper && device?.id && selectedItem) {
+              if (
+                hardwareCallStartedAt !== undefined &&
+                hardwareCallMs === undefined
+              ) {
+                hardwareCallMs = Date.now() - hardwareCallStartedAt;
+              }
+              const errorValue = error as {
+                code?: unknown;
+                errorCode?: unknown;
+              };
+              const code = errorValue?.code ?? errorValue?.errorCode;
+              const errorCode =
+                typeof code === 'string' || typeof code === 'number'
+                  ? String(code)
+                  : undefined;
+              const errorName = error instanceof Error ? error.name : undefined;
+              defaultLogger.hardware.homescreen.wallpaperApply({
+                deviceType: device.deviceType,
+                isCustomScreen,
+                status: 'failed',
+                totalDurationMs: Date.now() - applyStartedAt,
+                hardwareCallMs,
+                errorCode,
+                errorName,
+              });
+            }
             errorToastUtils.toastIfError(error);
             throw error;
           } finally {

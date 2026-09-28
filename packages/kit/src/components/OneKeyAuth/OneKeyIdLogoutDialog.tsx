@@ -39,8 +39,17 @@ function getErrorMessage(error: unknown): string {
   if (error instanceof Error && error.message) {
     return error.message;
   }
-  // TODO: i18n
   return String(error || 'Identity exit failed.');
+}
+
+function logIdentityExitError(error: unknown) {
+  if (process.env.NODE_ENV === 'production') {
+    return;
+  }
+
+  // Keep the original Error object so the browser console preserves its stack.
+  // eslint-disable-next-line no-console
+  console.error('[IdentityExit] execution failed', error);
 }
 
 function OneKeyIdLogoutDialogContent({
@@ -118,7 +127,7 @@ function OneKeyIdLogoutDialogContent({
                 planId: plan.planId,
                 acknowledgement: requiresAcknowledgement
                   ? 'keylessWalletRemoval'
-                  : undefined,
+                  : 'oneKeyIdLogout',
               });
             if (receipt.status === 'completed') {
               await onResult({ status: 'completed', receipt }, close);
@@ -133,6 +142,7 @@ function OneKeyIdLogoutDialogContent({
               close,
             );
           } catch (error) {
+            logIdentityExitError(error);
             await onResult(
               { status: 'blocked', message: getErrorMessage(error) },
               close,

@@ -1,8 +1,10 @@
+import { decryptRevealableSeed } from '@onekeyhq/core/src/secret';
 import { LocalSecretEnvelopeUnavailable } from '@onekeyhq/shared/src/errors';
 import { EOneKeyErrorClassNames } from '@onekeyhq/shared/src/errors/types/errorTypes';
 import errorToastUtils from '@onekeyhq/shared/src/errors/utils/errorToastUtils';
 import systemTimeUtils, {
   ECloudSyncDataTimeSource,
+  ELocalSystemTimeStatus,
 } from '@onekeyhq/shared/src/utils/systemTimeUtils';
 
 import localDb from '../../dbs/local/localDb';
@@ -10,6 +12,19 @@ import keylessSyncCredentialStorage from '../ServiceKeylessWallet/utils/keylessS
 import keylessCloudSyncUtils from '../ServicePrimeCloudSync/keylessCloudSyncUtils';
 
 import ServiceKeylessCloudSync from './ServiceKeylessCloudSync';
+
+const mockNonDbKdfParams = {
+  kdfBackend: 'webcrypto' as const,
+  enablePbkdf2Cache: true,
+};
+
+jest.mock('@onekeyhq/shared/src/appCrypto/modules/pbkdf2', () => ({
+  getPbkdf2KdfParamsForNonDbTx: jest.fn(() => mockNonDbKdfParams),
+}));
+
+jest.mock('@onekeyhq/core/src/secret', () => ({
+  decryptRevealableSeed: jest.fn(),
+}));
 
 jest.mock('../../dbs/local/localDb', () => ({
   __esModule: true,
@@ -52,6 +67,44 @@ describe('ServiceKeylessCloudSync', () => {
   afterEach(() => {
     jest.clearAllMocks();
     jest.restoreAllMocks();
+  });
+
+  test('does not report a transient unconfirmed time check as a clock error', async () => {
+    const showToast = jest.fn();
+    const service = new ServiceKeylessCloudSync({
+      backgroundApi: {
+        serviceApp: { showToast },
+      },
+    });
+    const now = Date.now();
+
+    systemTimeUtils.updateServerTime({
+      serverTime: now,
+      localTime: now,
+    });
+    systemTimeUtils.updateServerTime({
+      serverTime: now,
+      localTime: now + 20 * 60 * 1000,
+    });
+
+    expect(systemTimeUtils.systemTimeStatus).toBe(
+      ELocalSystemTimeStatus.INVALID,
+    );
+    expect(systemTimeUtils.isTimeErrorConfirmed).toBe(false);
+
+    jest.spyOn(service, 'getKeylessWallet').mockResolvedValue(null);
+
+    try {
+      await expect(
+        service.prepareCloudSyncKeyless({ silentEnable: true }),
+      ).resolves.toEqual({ success: false });
+      expect(showToast).toHaveBeenCalled();
+    } finally {
+      systemTimeUtils.updateServerTime({
+        serverTime: Date.now(),
+        localTime: Date.now(),
+      });
+    }
   });
 
   test('toggle keyless sync surfaces local secret envelope recovery dialog', async () => {
@@ -197,6 +250,49 @@ describe('ServiceKeylessCloudSync', () => {
         throwOnLocalSecretEnvelopeUnavailable: true,
       }),
     ).rejects.toBe(error);
+  });
+
+  test('repairs a missing keyless credential with the non-transaction KDF backend', async () => {
+    const service = new ServiceKeylessCloudSync({
+      backgroundApi: {},
+    });
+    const credential = {
+      keylessWalletId: 'hd-keyless-wallet-id',
+      signingPrivateKey: 'signing-private-key',
+      signingPublicKey: 'signing-public-key',
+      encryptionKey: 'encryption-key',
+      pwdHash: 'keyless-pwd-hash',
+    };
+
+    jest
+      .spyOn(service, 'getCurrentCloudSyncKeylessWalletId')
+      .mockResolvedValue(credential.keylessWalletId);
+    jest
+      .mocked(keylessSyncCredentialStorage.getCredential)
+      .mockResolvedValue(null);
+    jest.mocked(localDb).getCredentialInner.mockResolvedValue({
+      id: credential.keylessWalletId,
+      credential: 'encrypted-revealable-seed',
+    });
+    jest.mocked(decryptRevealableSeed).mockResolvedValue({
+      seed: '00',
+    } as never);
+    jest
+      .spyOn(keylessCloudSyncUtils, 'deriveKeylessCredential')
+      .mockResolvedValue(credential);
+
+    await service.repairKeylessSyncCredentialIfNeeded({
+      password: 'encoded-password',
+    });
+
+    expect(decryptRevealableSeed).toHaveBeenCalledWith({
+      ...mockNonDbKdfParams,
+      rs: 'encrypted-revealable-seed',
+      password: 'encoded-password',
+    });
+    expect(keylessSyncCredentialStorage.saveCredential).toHaveBeenCalledWith(
+      credential,
+    );
   });
 
   test('silent keyless sync enable replays scene sync items', async () => {

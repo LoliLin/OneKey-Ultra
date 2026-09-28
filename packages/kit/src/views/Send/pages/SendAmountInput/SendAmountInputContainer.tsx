@@ -1,4 +1,5 @@
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
   type ReactNode,
   memo,
   useCallback,
@@ -8,13 +9,18 @@ import {
   useState,
 } from 'react';
 
-import { useRoute } from '@react-navigation/core';
+import {
+  useFocusEffect,
+  useNavigation,
+  useRoute,
+} from '@react-navigation/core';
 import BigNumber from 'bignumber.js';
 import { isEmpty, isNil } from 'lodash';
 import { useIntl } from 'react-intl';
 import { InputAccessoryView } from 'react-native';
 
 import {
+  Accordion,
   Alert,
   Button,
   DashText,
@@ -40,6 +46,7 @@ import {
 } from '@onekeyhq/components';
 import { useForm } from '@onekeyhq/components/src/hooks/useForm';
 import backgroundApiProxy from '@onekeyhq/kit/src/background/instance/backgroundApiProxy';
+import { confirmCexDepositIfUnsupported } from '@onekeyhq/kit/src/components/AddressInput/confirmCexDepositIfUnsupported';
 import AddressTypeSelector from '@onekeyhq/kit/src/components/AddressTypeSelector/AddressTypeSelector';
 import AddressTypeSelectorTrigger from '@onekeyhq/kit/src/components/AddressTypeSelector/AddressTypeSelectorTrigger';
 import { calcPercentBalance } from '@onekeyhq/kit/src/components/PercentageStageOnKeyboard';
@@ -56,10 +63,12 @@ import {
   useSendConfirmActions,
 } from '@onekeyhq/kit/src/states/jotai/contexts/sendConfirm';
 import { convertTokenFiatToCurrency } from '@onekeyhq/kit/src/utils/fiatConvert';
+import { tryOpenHeadlessBuy } from '@onekeyhq/kit/src/views/FiatCrypto/utils/openFiatCryptoOrHeadless';
 import { SendTestIDs } from '@onekeyhq/kit/src/views/Send/testIDs';
 import { SwapRefreshButtonBase } from '@onekeyhq/kit/src/views/Swap/components/SwapRefreshButton';
 import {
   useCurrencyPersistAtom,
+  useInscriptionProtectionStateAtom,
   useSettingsPersistAtom,
 } from '@onekeyhq/kit-bg/src/states/jotai/atoms';
 import type {
@@ -86,6 +95,7 @@ import type {
   IModalSignatureConfirmParamList,
 } from '@onekeyhq/shared/src/routes';
 import accountUtils from '@onekeyhq/shared/src/utils/accountUtils';
+import { getBadgeQueryTokenAddress } from '@onekeyhq/shared/src/utils/cexDepositSupportUtils';
 import chainValueUtils from '@onekeyhq/shared/src/utils/chainValueUtils';
 import hexUtils from '@onekeyhq/shared/src/utils/hexUtils';
 import networkUtils from '@onekeyhq/shared/src/utils/networkUtils';
@@ -94,9 +104,11 @@ import {
   openUrlExternal,
 } from '@onekeyhq/shared/src/utils/openUrlUtils';
 import { formatSwapQuoteDuration } from '@onekeyhq/shared/src/utils/swapQuoteDurationUtils';
+import tokenRebaseUtils from '@onekeyhq/shared/src/utils/tokenRebaseUtils';
 import { equalTokenNoCaseSensitive } from '@onekeyhq/shared/src/utils/tokenUtils';
 import { UNAVAILABLE_DISPLAY } from '@onekeyhq/shared/src/utils/tokenValueUtils';
 import type { IAddressValidateStatus } from '@onekeyhq/shared/types/address';
+import { EHeadlessBuyEntry } from '@onekeyhq/shared/types/fiatCrypto';
 import { ELightningUnit } from '@onekeyhq/shared/types/lightning';
 import type { IAccountNFT } from '@onekeyhq/shared/types/nft';
 import { ENFTType } from '@onekeyhq/shared/types/nft';
@@ -110,6 +122,7 @@ import {
 import type {
   IFetchQuoteInfo,
   IFetchQuoteResult,
+  ISwapNativeTokenConfig,
   ISwapQuoteEvent,
   ISwapQuoteEventAutoSlippage,
   ISwapQuoteEventData,
@@ -126,6 +139,7 @@ import {
   ESwapQuoteKind,
   ESwapSource,
   ESwapTabSwitchType,
+  ESwapTradeSource,
   ESwapTxHistoryStatus,
 } from '@onekeyhq/shared/types/swap/types';
 import type { IToken, ITokenFiat } from '@onekeyhq/shared/types/token';
@@ -149,10 +163,16 @@ import {
   type ISiblingDeriveBalance,
   useSiblingDeriveBalances,
 } from './hooks/useSiblingDeriveBalances';
+import {
+  calcPrivateSendNativeTokenMaxAmount,
+  getMaxSendStateAfterModeChange,
+} from './privateSendMaxAmountUtils';
 
 import type { RouteProp } from '@react-navigation/core';
 
 export const amountInputAccessoryViewID = 'send-amount-input-accessory-view';
+
+const IOS_AUTO_FOCUS_FALLBACK_MS = 500;
 
 // Neutral, non-empty hint used to keep the amount error suppressed while the
 // user is typing on chains/tokens that have no min-amount hint (most EVM
@@ -202,6 +222,8 @@ enum ESendMode {
   PUBLIC = 'public',
   PRIVATE = 'private',
 }
+
+const PRIVATE_SEND_QUOTE_ACCORDION_VALUE = 'private-send-quote-details';
 
 type IPrivateSendQuoteResult = {
   selectedQuote?: IFetchQuoteResult;
@@ -804,6 +826,7 @@ function SendAmountInputContainer() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isMaxSend, setIsMaxSend] = useState(false);
   const [settings, setSettings] = useSettingsPersistAtom();
+  const [inscriptionProtectionState] = useInscriptionProtectionStateAtom();
   const [{ currencyMap }] = useCurrencyPersistAtom();
   const [selectedUTXOs] = useSelectedUTXOsAtom();
   const sendConfirmActions = useSendConfirmActions();
@@ -832,6 +855,7 @@ function SendAmountInputContainer() {
     onCancel,
     amount: prefillAmount,
     isInvoiceAmountLocked,
+    hasAcknowledgedCexDepositWarning,
   } = route.params;
 
   const nft = nfts?.[0];
@@ -847,6 +871,14 @@ function SendAmountInputContainer() {
       accountId: currentAccountId,
       networkId,
     });
+  const badgeQueryTokenAddress = getBadgeQueryTokenAddress({
+    isNFT,
+    isNative: tokenInfo?.isNative,
+    tokenAddress: tokenInfo?.address,
+    nativeTokenAddress:
+      vaultSettings?.networkInfo[networkId]?.nativeTokenAddress ??
+      vaultSettings?.networkInfo.default.nativeTokenAddress,
+  });
 
   const walletId = useMemo(
     () =>
@@ -865,7 +897,10 @@ function SendAmountInputContainer() {
     defaultValues: {
       accountId,
       networkId,
-      amount: prefillAmount || '0',
+      // Seed an empty amount and let the placeholder draw the "0": a literal
+      // "0" is real text, so the first keystroke lands as "01" natively and
+      // is only normalized to "1" after the JS round trip (visible flash).
+      amount: prefillAmount || '',
       nftAmount: isNFT && nft?.collectionType === ENFTType.ERC1155 ? '' : '1',
       txMessage: '',
     },
@@ -912,15 +947,13 @@ function SendAmountInputContainer() {
           ],
         });
       } else if (!isNFT && tokenInfo) {
-        const checkInscriptionProtectionEnabled =
-          await backgroundApiProxy.serviceSetting.checkInscriptionProtectionEnabled(
+        const withCheckInscription =
+          await backgroundApiProxy.serviceSetting.getEffectiveInscriptionProtection(
             {
               networkId: network.id,
               accountId: account.id,
             },
           );
-        const withCheckInscription =
-          checkInscriptionProtectionEnabled && settings.inscriptionProtection;
         tokenResp = await serviceToken.fetchTokensDetails({
           networkId: network.id,
           accountId: account.id,
@@ -940,6 +973,8 @@ function SendAmountInputContainer() {
       // balance was fetched for — it lags `currentAccountId` after a switch.
       return [tokenResp?.[0], nftResp?.[0], frozenBalanceSettings, account.id];
     },
+    // The policy state is an intentional invalidation signal; bg computes the final value.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
     [
       account,
       isNFT,
@@ -949,7 +984,8 @@ function SendAmountInputContainer() {
       serviceToken,
       token,
       tokenInfo,
-      settings.inscriptionProtection,
+      inscriptionProtectionState.localEnabled,
+      inscriptionProtectionState.serverEnabled,
     ],
     {
       watchLoading: true,
@@ -1038,6 +1074,34 @@ function SendAmountInputContainer() {
     () => convertTokenToSwapToken({ networkId, tokenDetails }),
     [networkId, tokenDetails],
   );
+  const isPrivateSendNativeToken =
+    sendMode === ESendMode.PRIVATE && privateSendToken?.isNative === true;
+  const privateSendNativeTokenNetworkId = isPrivateSendNativeToken
+    ? privateSendToken.networkId
+    : undefined;
+  const {
+    result: privateSendNativeTokenConfig,
+    isLoading: isPrivateSendNativeTokenConfigLoading,
+  } = usePromiseResult<ISwapNativeTokenConfig | undefined>(
+    async () => {
+      if (!privateSendNativeTokenNetworkId) {
+        return undefined;
+      }
+      return backgroundApiProxy.serviceSwap.fetchSwapNativeTokenConfig({
+        networkId: privateSendNativeTokenNetworkId,
+        throwOnError: true,
+      });
+    },
+    [privateSendNativeTokenNetworkId],
+    {
+      watchLoading: true,
+      undefinedResultIfError: true,
+      undefinedResultIfReRun: true,
+    },
+  );
+  const isPrivateSendNativeTokenConfigReady =
+    !isPrivateSendNativeToken ||
+    privateSendNativeTokenConfig?.networkId === privateSendNativeTokenNetworkId;
   const sendSwapTargetToken = useMemo(
     () =>
       privateSendToken ??
@@ -1061,31 +1125,24 @@ function SendAmountInputContainer() {
       if (
         isNFT ||
         isLightningNetwork ||
-        !privateSendToken ||
+        !tokenInfo ||
         !account?.address ||
         !currentAccountId
       ) {
         return false;
       }
       try {
-        const privateSendTokens =
-          await backgroundApiProxy.serviceSwap.fetchSwapTokenDetails({
+        // Keyed identically to the recipient-page prefetch, so this resolves
+        // from the ServiceSwap memo cache (or joins the in-flight request)
+        // instead of chaining behind the token-details fetch above.
+        return await backgroundApiProxy.serviceSwap.checkTokenPrivateSendSupported(
+          {
             networkId,
-            contractAddress: privateSendToken.contractAddress,
+            contractAddress: tokenInfo.address,
             accountAddress: account.address,
             accountId: currentAccountId,
-            protocol: EProtocolOfExchange.PRIVATE_SEND,
-          });
-        const matchedPrivateSendToken = privateSendTokens?.find((item) =>
-          equalTokenNoCaseSensitive({
-            token1: item,
-            token2: privateSendToken,
-          }),
+          },
         );
-        if (!matchedPrivateSendToken) {
-          return false;
-        }
-        return matchedPrivateSendToken.supportProtocol === true;
       } catch {
         return false;
       }
@@ -1096,7 +1153,7 @@ function SendAmountInputContainer() {
       isLightningNetwork,
       isNFT,
       networkId,
-      privateSendToken,
+      tokenInfo,
     ],
     { watchLoading: true, alwaysSetState: true },
   );
@@ -1105,6 +1162,13 @@ function SendAmountInputContainer() {
 
   useEffect(() => {
     if (!showPrivateSendModeSwitch && sendMode === ESendMode.PRIVATE) {
+      setIsMaxSend((currentIsMaxSend) =>
+        getMaxSendStateAfterModeChange({
+          isMaxSend: currentIsMaxSend,
+          isCurrentModePrivate: true,
+          isNextModePrivate: false,
+        }),
+      );
       setSendMode(ESendMode.PUBLIC);
     }
   }, [sendMode, showPrivateSendModeSwitch]);
@@ -1161,6 +1225,21 @@ function SendAmountInputContainer() {
     return undefined;
   }, [currentSelectedUtxoInfo?.totalValue, tokenDetails?.info]);
 
+  // Scaled-UI (rebase) token multiplier shared by every display-basis leaf
+  // (maxBalance, the fiat-overflow rewrite) and the display->raw submit
+  // conversion. A scaled-UI multiplier is a Token-2022 / jetton feature and
+  // can never legitimately appear on a native coin, so native resolves to
+  // undefined here; guarding once at the source keeps multiply and divide
+  // symmetric — a hypothetical bad server value on a native coin must not
+  // inflate the display while the submit conversion refuses to divide.
+  const rebaseMultiplier = useMemo(
+    () =>
+      tokenDetails && !tokenDetails.info.isNative
+        ? tokenRebaseUtils.pickBalanceMultiplier(tokenDetails)
+        : undefined,
+    [tokenDetails],
+  );
+
   const maxBalance = useMemo(() => {
     if (!tokenDetails) return '0';
     // `??` (not `||`) so a genuine "0" subtotal is kept, not replaced by the
@@ -1172,8 +1251,22 @@ function SendAmountInputContainer() {
       return chainValueUtils.convertSatsToBtc(balance);
     }
 
-    return balance;
-  }, [selectedUtxoTotalAmount, isLightningNetwork, lnUnit, tokenDetails]);
+    // Scaled-UI (rebase) tokens: show the multiplied display balance. UTXO
+    // subtotals and Lightning never belong to such tokens, so applying
+    // unconditionally is a no-op for every other chain.
+    return (
+      tokenRebaseUtils.applyBalanceMultiplier({
+        amount: balance,
+        balanceMultiplier: rebaseMultiplier,
+      }) ?? balance
+    );
+  }, [
+    selectedUtxoTotalAmount,
+    isLightningNetwork,
+    lnUnit,
+    tokenDetails,
+    rebaseMultiplier,
+  ]);
 
   const maxBalanceFiat = useMemo(() => {
     if (!tokenDetails) return '0';
@@ -1190,6 +1283,39 @@ function SendAmountInputContainer() {
     }
     return tokenDetails.fiatValue ?? '0';
   }, [tokenDetails, selectedUtxoTotalAmount]);
+
+  const privateSendMaxTokenAmount = useMemo(() => {
+    if (!isPrivateSendNativeToken || !isPrivateSendNativeTokenConfigReady) {
+      return undefined;
+    }
+    return calcPrivateSendNativeTokenMaxAmount({
+      balance: maxBalance,
+      reserveGas: privateSendNativeTokenConfig?.reserveGas,
+      decimals: privateSendToken?.decimals,
+    });
+  }, [
+    isPrivateSendNativeToken,
+    isPrivateSendNativeTokenConfigReady,
+    maxBalance,
+    privateSendNativeTokenConfig?.reserveGas,
+    privateSendToken?.decimals,
+  ]);
+
+  const privateSendMaxInputAmount = useMemo(() => {
+    if (privateSendMaxTokenAmount === undefined) {
+      return undefined;
+    }
+    if (!isUseFiat) {
+      return privateSendMaxTokenAmount;
+    }
+    const priceBN = new BigNumber(tokenDetails?.price ?? '');
+    if (!priceBN.isFinite() || priceBN.lte(0)) {
+      return undefined;
+    }
+    return new BigNumber(privateSendMaxTokenAmount)
+      .multipliedBy(priceBN)
+      .toFixed();
+  }, [isUseFiat, privateSendMaxTokenAmount, tokenDetails?.price]);
 
   const linkedAmount = useMemo(() => {
     const amountBN = new BigNumber(amount || 0);
@@ -1262,6 +1388,45 @@ function SendAmountInputContainer() {
     () => new BigNumber(privateSendAmount || 0),
     [privateSendAmount],
   );
+  const shouldApplyPrivateSendNativeMax = isPrivateSendNativeToken && isMaxSend;
+  const isPrivateSendNativeMaxAmountReady = useMemo(() => {
+    if (!shouldApplyPrivateSendNativeMax) {
+      return true;
+    }
+    if (
+      !isPrivateSendNativeTokenConfigReady ||
+      privateSendMaxTokenAmount === undefined ||
+      privateSendAmountBN.isNaN()
+    ) {
+      return false;
+    }
+    return privateSendAmountBN.lte(privateSendMaxTokenAmount);
+  }, [
+    isPrivateSendNativeTokenConfigReady,
+    privateSendAmountBN,
+    privateSendMaxTokenAmount,
+    shouldApplyPrivateSendNativeMax,
+  ]);
+
+  useEffect(() => {
+    if (
+      !shouldApplyPrivateSendNativeMax ||
+      privateSendMaxInputAmount === undefined ||
+      privateSendMaxTokenAmount === undefined ||
+      privateSendAmountBN.lte(privateSendMaxTokenAmount)
+    ) {
+      return;
+    }
+    form.setValue('amount', privateSendMaxInputAmount, {
+      shouldValidate: true,
+    });
+  }, [
+    form,
+    privateSendAmountBN,
+    privateSendMaxInputAmount,
+    privateSendMaxTokenAmount,
+    shouldApplyPrivateSendNativeMax,
+  ]);
   const {
     result: privateSendQuoteRecipientResult,
     isLoading: isPrivateSendRecipientResolving,
@@ -1288,6 +1453,7 @@ function SendAmountInputContainer() {
             enableAllowListValidation,
             ignoreSimilarAddressInAddressBook: true,
             enableCheckSimilarAddressInAddressBook: false,
+            tokenAddress: badgeQueryTokenAddress,
           });
 
         const validationStatus = queryResult.validStatus ?? 'unknown';
@@ -1313,6 +1479,7 @@ function SendAmountInputContainer() {
       }
     },
     [
+      badgeQueryTokenAddress,
       currentAccountId,
       enableAllowListValidation,
       networkId,
@@ -1336,10 +1503,12 @@ function SendAmountInputContainer() {
       !!privateSendToken &&
       !!account?.address &&
       !!recipientAddress &&
+      isPrivateSendNativeMaxAmountReady &&
       !privateSendAmountBN.isNaN() &&
       privateSendAmountBN.isGreaterThan(0),
     [
       account?.address,
+      isPrivateSendNativeMaxAmountReady,
       isPrivateSendSupported,
       privateSendAmountBN,
       privateSendToken,
@@ -1600,8 +1769,12 @@ function SendAmountInputContainer() {
     // Don't validate here — the validator closes over the stale isUseFiat
     // value, causing false min-amount errors (OK-52679). A useEffect below
     // re-triggers validation after isUseFiat state has propagated.
-    form.setValue('amount', amountValue);
+    // An empty amount stays empty: `linkedAmount` treats '' as 0 on both
+    // sides, and writing that '0' back would re-seed the literal text that
+    // makes the next keystroke flash as "01" on native.
+    form.setValue('amount', amount ? amountValue : '');
   }, [
+    amount,
     form,
     hasUsablePrice,
     isLightningNetwork,
@@ -1747,6 +1920,27 @@ function SendAmountInputContainer() {
     sendMode,
   ]);
 
+  // Scaled-UI (rebase) tokens: `displayAmount` is the multiplied display
+  // amount, but ITransferInfo.amount carries the raw parsed amount. The
+  // conversion (full-send threshold detection + truncating division) lives
+  // in tokenRebaseUtils.convertDisplayAmountToRawAmount so it stays
+  // unit-testable; it is shared by the submit path and the form validator
+  // so the amount that gets validated is exactly the amount that gets sent.
+  const convertDisplayAmountToRawAmount = useCallback(
+    (displayAmount: string): { rawAmount: string; isFullSend: boolean } => {
+      if (isNFT || !tokenDetails) {
+        return { rawAmount: displayAmount, isFullSend: false };
+      }
+      return tokenRebaseUtils.convertDisplayAmountToRawAmount({
+        displayAmount,
+        balanceParsed: tokenDetails.balanceParsed,
+        balanceMultiplier: rebaseMultiplier,
+        decimals: tokenDetails.info.decimals,
+      });
+    },
+    [isNFT, tokenDetails, rebaseMultiplier],
+  );
+
   const handleValidateTokenAmount = useCallback(
     async (value: string): Promise<string | undefined> => {
       if (!value) {
@@ -1850,6 +2044,37 @@ function SendAmountInputContainer() {
         });
       }
 
+      // Scaled-UI (rebase) tokens: the checks above ran on the display-basis
+      // amount, but the transfer carries display ÷ multiplier truncated
+      // (ROUND_DOWN) at token decimals. An input at the minimal display unit
+      // (e.g. 0.00000001 with multiplier 1.1) passes the display-basis min
+      // check yet divides to a raw 0, which would build — and pay fees for —
+      // a zero-amount transfer. Reject it here with the exact conversion the
+      // submit path uses. Full sends are exempt: they bypass the division and
+      // a zero raw balance is the insufficient-balance path's concern.
+      if (
+        !isNFT &&
+        !tokenAmountBN.isZero() &&
+        tokenRebaseUtils.isValidBalanceMultiplier(rebaseMultiplier)
+      ) {
+        try {
+          const { rawAmount, isFullSend } = convertDisplayAmountToRawAmount(
+            tokenAmountBN.toFixed(),
+          );
+          if (!isFullSend && new BigNumber(rawAmount).isZero()) {
+            return intl.formatMessage({
+              id: ETranslations.send_amount_too_small,
+            });
+          }
+        } catch {
+          // removeBalanceMultiplier fails closed on invalid token decimals;
+          // surface it as an invalid amount instead of an unhandled rejection.
+          return intl.formatMessage({
+            id: ETranslations.send_amount_invalid,
+          });
+        }
+      }
+
       // Zero native token transfer prevention
       if (
         !isNFT &&
@@ -1902,6 +2127,8 @@ function SendAmountInputContainer() {
       networkId,
       maxBalance,
       recipientAddress,
+      rebaseMultiplier,
+      convertDisplayAmountToRawAmount,
     ],
   );
 
@@ -1991,10 +2218,6 @@ function SendAmountInputContainer() {
     networkId,
     indexedAccountId: account?.indexedAccountId ?? '',
     tokenAddress: tokenInfo?.address ?? '',
-    // Spendable balance depends on this setting; feeding it in (and keying the
-    // sibling cache on it) keeps siblings on the same balance contract as the
-    // current page and invalidates the cache when the user toggles it mid-flow.
-    inscriptionProtection: !!settings.inscriptionProtection,
   });
 
   const performAutoSwitchToAccount = useCallback(
@@ -2090,6 +2313,16 @@ function SendAmountInputContainer() {
   const handleBuyToken = useCallback(async () => {
     setIsBuyLoading(true);
     try {
+      if (
+        await tryOpenHeadlessBuy({
+          networkId,
+          tokenAddress: tokenInfo?.address ?? '',
+          accountId: currentAccountId,
+          entryFrom: EHeadlessBuyEntry.SendInsufficientBalance,
+        })
+      ) {
+        return;
+      }
       const { url } =
         await backgroundApiProxy.serviceFiatCrypto.generateWidgetUrl({
           networkId,
@@ -2131,6 +2364,16 @@ function SendAmountInputContainer() {
 
   const onSelectPercentageStage = useCallback(
     (stage: number) => {
+      if (stage === 100 && isPrivateSendNativeToken) {
+        if (privateSendMaxInputAmount === undefined) {
+          return;
+        }
+        form.setValue('amount', privateSendMaxInputAmount, {
+          shouldValidate: true,
+        });
+        setIsMaxSend(true);
+        return;
+      }
       const balance = isUseFiat ? maxBalanceFiat : maxBalance;
       let decimals = tokenDetails?.info.decimals;
       if (isUseFiat) {
@@ -2156,10 +2399,12 @@ function SendAmountInputContainer() {
       form,
       isIntegerAmount,
       isLightningNetwork,
+      isPrivateSendNativeToken,
       isUseFiat,
       lnUnit,
       maxBalance,
       maxBalanceFiat,
+      privateSendMaxInputAmount,
       tokenDetails?.info.decimals,
     ],
   );
@@ -2199,8 +2444,14 @@ function SendAmountInputContainer() {
       if (!inputValue && hadUserInput) {
         return '0';
       }
+      // A fully cleared field stays empty so the placeholder draws the "0";
+      // the integer branch below would otherwise turn '' into a literal '0'
+      // (Lightning sats) and bring back the "01" first-keystroke flash.
+      if (!inputValue) {
+        return '';
+      }
 
-      const valueBN = new BigNumber(inputValue || 0);
+      const valueBN = new BigNumber(inputValue);
       if (valueBN.isNaN()) {
         return '0';
       }
@@ -2280,13 +2531,108 @@ function SendAmountInputContainer() {
   // Ref to track submit disabled state for keyboard shortcuts
   const isSubmitDisabledRef = useRef(true);
 
-  // Auto-focus the amount input after page transition animation completes
+  // iOS uses a native slide-from-right push for modal stack screens. Wait for
+  // that transition to finish before focusing so the keyboard rises from the
+  // bottom instead of entering sideways with the screen. Keep this initial
+  // focus one-shot so returning from a child route does not reopen the iOS
+  // keyboard.
+  const hasAutoFocusedAmountInputRef = useRef(false);
+  const hasStartedIOSAutoFocusRef = useRef(false);
+  const reactNavigation = useNavigation();
+
+  // Android (react-native-screens) detaches this screen while the confirm page
+  // is on top, which drops the native focus, so it re-focuses on every route
+  // focus. Web and desktop keep the previous once-only delayed auto-focus.
+  useFocusEffect(
+    useCallback(() => {
+      if (platformEnv.isNativeIOS) {
+        if (
+          hasStartedIOSAutoFocusRef.current ||
+          hasAutoFocusedAmountInputRef.current
+        ) {
+          return undefined;
+        }
+        hasStartedIOSAutoFocusRef.current = true;
+
+        let isActive = true;
+        let fallbackTimer: ReturnType<typeof setTimeout> | undefined;
+        let removeTransitionEndListener: (() => void) | undefined;
+
+        const clearFocusSchedule = () => {
+          if (fallbackTimer !== undefined) {
+            clearTimeout(fallbackTimer);
+            fallbackTimer = undefined;
+          }
+          removeTransitionEndListener?.();
+          removeTransitionEndListener = undefined;
+        };
+
+        const focusIfNeeded = () => {
+          const amountInput = amountInputRef.current;
+          if (
+            !isActive ||
+            hasAutoFocusedAmountInputRef.current ||
+            !reactNavigation.isFocused() ||
+            !amountInput
+          ) {
+            return;
+          }
+          clearFocusSchedule();
+          hasAutoFocusedAmountInputRef.current = true;
+          amountInput.focus();
+        };
+
+        removeTransitionEndListener = reactNavigation.addListener(
+          'transitionEnd' as any,
+          (event) => {
+            if (event.data?.closing === false) {
+              focusIfNeeded();
+            }
+          },
+        );
+
+        // A cold lazy load can attach after transitionEnd. Keep the fallback
+        // beyond the native push window and cancel it as soon as focus is lost.
+        fallbackTimer = setTimeout(focusIfNeeded, IOS_AUTO_FOCUS_FALLBACK_MS);
+
+        return () => {
+          isActive = false;
+          clearFocusSchedule();
+        };
+      }
+      if (
+        hasAutoFocusedAmountInputRef.current &&
+        !platformEnv.isNativeAndroid
+      ) {
+        return undefined;
+      }
+      hasAutoFocusedAmountInputRef.current = true;
+      const timer = setTimeout(() => {
+        amountInputRef.current?.focus();
+      }, 300);
+      return () => clearTimeout(timer);
+    }, [reactNavigation]),
+  );
+
+  // Blur the amount input and dismiss the IME before this screen is popped.
+  // The input is a Nitro HybridView that, unlike RN's TextInput, does not hide
+  // the keyboard when Android clears its focus during the exit transition; the
+  // focus recovery then hands the still-visible keyboard to the next focusable
+  // input in the window, so header back with the keyboard up left it open on
+  // the previous page. Blurring alone is not guaranteed to hide the IME for
+  // this input, so follow it with the global `Keyboard.dismiss()`
+  // (KeyboardController) like the overlay-open path does. `beforeRemove` fires
+  // while the native view is still alive; by the time the unmount cleanup runs
+  // the ref is already detached.
   useEffect(() => {
-    const timer = setTimeout(() => {
-      amountInputRef.current?.focus();
-    }, 300);
-    return () => clearTimeout(timer);
-  }, []);
+    if (!platformEnv.isNative) {
+      return undefined;
+    }
+    return reactNavigation.addListener('beforeRemove', () => {
+      amountInputRef.current?.blur();
+      Keyboard.dismiss();
+    });
+  }, [reactNavigation]);
 
   const handleAmountInputFocus = useCallback(() => {
     setIsAmountInputFocused(true);
@@ -2463,6 +2809,7 @@ function SendAmountInputContainer() {
         enableAllowListValidation,
         ignoreSimilarAddressInAddressBook: true,
         enableCheckSimilarAddressInAddressBook: true,
+        tokenAddress: badgeQueryTokenAddress,
       });
 
     const validationStatus = queryResult.validStatus ?? 'unknown';
@@ -2492,19 +2839,38 @@ function SendAmountInputContainer() {
       }
     }
 
+    const { canProceed } = await confirmCexDepositIfUnsupported({
+      intl,
+      isNFT,
+      networkId,
+      tokenSymbol: tokenInfo?.symbol,
+      networkName: network?.name,
+      page: 'amount',
+      cexSupportedInfo: queryResult.cexSupportedInfo,
+      hasAcknowledgedWarning: hasAcknowledgedCexDepositWarning,
+    });
+    if (!canProceed) {
+      return undefined;
+    }
+
     return {
       recipientAddress: resolvedRecipientAddress,
       recipientIsContract:
         queryResult.isContract ?? recipientIsContract ?? false,
     };
   }, [
+    badgeQueryTokenAddress,
     currentAccountId,
     enableAllowListValidation,
     getRecipientValidateMessage,
+    hasAcknowledgedCexDepositWarning,
     intl,
+    isNFT,
+    network?.name,
     networkId,
     recipientAddress,
     recipientIsContract,
+    tokenInfo?.symbol,
   ]);
 
   const confirmPrivateSendValueDrop = useCallback(
@@ -2604,7 +2970,10 @@ function SendAmountInputContainer() {
                 realAmount =
                   isLightningNetwork && lnUnit === ELightningUnit.BTC
                     ? chainValueUtils.convertSatsToBtc(balance)
-                    : balance;
+                    : (tokenRebaseUtils.applyBalanceMultiplier({
+                        amount: balance,
+                        balanceMultiplier: rebaseMultiplier,
+                      }) ?? balance);
               } else {
                 realAmount = linkedAmount.originalAmount;
               }
@@ -2652,6 +3021,17 @@ function SendAmountInputContainer() {
                 }),
               );
             }
+            // Scaled-UI (rebase) tokens are display-basis in this branch and
+            // never reach the display->raw conversion below; fail closed
+            // instead of silently over-sending by the multiplier if one ever
+            // gets listed for private send. A multiplier of exactly 1 is a
+            // no-op (raw == display) and must not block.
+            if (tokenRebaseUtils.isScalingBalanceMultiplier(rebaseMultiplier)) {
+              throw new OneKeyLocalError(
+                'Private send does not support scaled-UI tokens',
+              );
+            }
+
             const submitPrivateSendQuoteScopeKey =
               buildPrivateSendQuoteScopeKey({
                 accountId: currentAccountId,
@@ -2687,6 +3067,7 @@ function SendAmountInputContainer() {
                 quoteResultCtx: privateSendQuote.quoteResultCtx,
                 protocol: EProtocolOfExchange.PRIVATE_SEND,
                 kind: privateSendQuote.kind ?? ESwapQuoteKind.SELL,
+                tradeSource: ESwapTradeSource.UNKNOWN,
               });
 
             if (!buildSwapRes?.changellyOrder) {
@@ -2894,6 +3275,9 @@ function SendAmountInputContainer() {
                   instantRate: normalizedBuildSwapRes.result.instantRate ?? '',
                   provider: privateSendProviderInfo,
                   oneKeyFee: normalizedBuildSwapRes.result.fee?.percentageFee,
+                  isFreeNetworkFee:
+                    data?.[0]?.isNetworkFeeSponsored ??
+                    normalizedBuildSwapRes.result.fee?.isFreeNetworkFee,
                   protocolFee: normalizedBuildSwapRes.result.fee?.protocolFees,
                   otherFeeInfos:
                     normalizedBuildSwapRes.result.fee?.otherFeeInfos ?? [],
@@ -2975,11 +3359,19 @@ function SendAmountInputContainer() {
             return;
           }
 
+          // Scaled-UI (rebase) tokens: `realAmount` is the multiplied display
+          // amount, but ITransferInfo.amount carries the raw parsed amount.
+          // The conversion (full-send detection + truncating division) lives
+          // in convertDisplayAmountToRawAmount, shared with the form
+          // validator so what was validated is exactly what is sent.
+          const transferAmount =
+            convertDisplayAmountToRawAmount(realAmount).rawAmount;
+
           const transfersInfo: ITransferInfo[] = [
             {
               from: account.address,
               to: submitRecipientAddress,
-              amount: realAmount,
+              amount: transferAmount,
               nftInfo:
                 isNFT && nftDetails
                   ? {
@@ -3084,6 +3476,8 @@ function SendAmountInputContainer() {
       validateRecipientBeforeSubmit,
       wallet?.type,
       intl,
+      rebaseMultiplier,
+      convertDisplayAmountToRawAmount,
     ],
   );
 
@@ -3218,6 +3612,13 @@ function SendAmountInputContainer() {
       const nextMode =
         value === ESendMode.PRIVATE ? ESendMode.PRIVATE : ESendMode.PUBLIC;
       if (nextMode !== sendMode) {
+        setIsMaxSend((currentIsMaxSend) =>
+          getMaxSendStateAfterModeChange({
+            isMaxSend: currentIsMaxSend,
+            isCurrentModePrivate: sendMode === ESendMode.PRIVATE,
+            isNextModePrivate: nextMode === ESendMode.PRIVATE,
+          }),
+        );
         defaultLogger.transaction.send.sendModeSwitch({
           fromMode: sendMode,
           toMode: nextMode,
@@ -3850,8 +4251,25 @@ function SendAmountInputContainer() {
           variant="secondary"
           size="small"
           ml="$2"
+          disabled={
+            isPrivateSendNativeToken && privateSendMaxInputAmount === undefined
+          }
+          loading={
+            isPrivateSendNativeToken &&
+            (isPrivateSendNativeTokenConfigLoading ||
+              !isPrivateSendNativeTokenConfigReady)
+          }
           onPress={() => {
-            form.setValue('amount', isUseFiat ? maxBalanceFiat : maxBalance, {
+            let maxInputAmount: string | undefined = isUseFiat
+              ? maxBalanceFiat
+              : maxBalance;
+            if (isPrivateSendNativeToken) {
+              maxInputAmount = privateSendMaxInputAmount;
+            }
+            if (maxInputAmount === undefined) {
+              return;
+            }
+            form.setValue('amount', maxInputAmount, {
               shouldValidate: true,
             });
             setIsMaxSend(true);
@@ -3868,11 +4286,15 @@ function SendAmountInputContainer() {
     form,
     intl,
     isLoadingAssets,
+    isPrivateSendNativeToken,
+    isPrivateSendNativeTokenConfigLoading,
+    isPrivateSendNativeTokenConfigReady,
     isUseFiat,
     maxBalance,
     maxBalanceFiat,
     network?.logoURI,
     nftDetails,
+    privateSendMaxInputAmount,
     sendMode,
     tokenDetails,
     tokenInfo?.logoURI,
@@ -3891,6 +4313,15 @@ function SendAmountInputContainer() {
         py="$2.5"
         alignItems="center"
         width="100%"
+        {...(platformEnv.isNativeIOS
+          ? {
+              // Keep the card on one native layer while its ancestors follow
+              // the keyboard. Fabric can otherwise commit flattened child
+              // frames before the card background during the layout animation.
+              collapsable: false,
+              shouldRasterizeIOS: true,
+            }
+          : {})}
       >
         {renderBalanceRowContent()}
       </XStack>
@@ -4110,7 +4541,7 @@ function SendAmountInputContainer() {
             }}
             onPress={handleTogglePrivateSendQuoteDetails}
             {...(!platformEnv.isNative && {
-              onKeyDown: (event: KeyboardEvent) => {
+              onKeyDown: (event: ReactKeyboardEvent<HTMLDivElement>) => {
                 if (event.key !== 'Enter' && event.key !== ' ') return;
                 event.preventDefault();
                 event.stopPropagation();
@@ -4164,7 +4595,7 @@ function SendAmountInputContainer() {
               borderRadius="$full"
             >
               <Stack
-                animation="quick"
+                transition="quick"
                 rotate={isPrivateSendQuoteDetailsExpanded ? '0deg' : '-90deg'}
                 transformOrigin="center"
               >
@@ -4177,9 +4608,23 @@ function SendAmountInputContainer() {
             </Stack>
           </XStack>
         </XStack>
-        <HeightTransition hide={!isPrivateSendQuoteDetailsExpanded}>
-          {renderPrivateSendQuoteDetails}
-        </HeightTransition>
+        <Accordion
+          type="single"
+          collapsible
+          value={
+            isPrivateSendQuoteDetailsExpanded
+              ? PRIVATE_SEND_QUOTE_ACCORDION_VALUE
+              : ''
+          }
+        >
+          <Accordion.Item value={PRIVATE_SEND_QUOTE_ACCORDION_VALUE}>
+            <Accordion.HeightAnimator transition="quick">
+              <Accordion.Content unstyled>
+                {renderPrivateSendQuoteDetails}
+              </Accordion.Content>
+            </Accordion.HeightAnimator>
+          </Accordion.Item>
+        </Accordion>
         {showPrivateSendBalanceRow ? (
           <>
             <Stack h="$px" bg="$borderSubdued" my="$2" />

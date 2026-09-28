@@ -1,5 +1,6 @@
 import platformEnv from '@onekeyhq/shared/src/platformEnv';
 import { ETabRoutes } from '@onekeyhq/shared/src/routes';
+import type { IPro2FirmwareUpdateTarget } from '@onekeyhq/shared/types/device';
 import type { EServiceEndpointEnum } from '@onekeyhq/shared/types/endpoint';
 
 import { EAtomNames } from '../atomNames';
@@ -79,9 +80,14 @@ export interface IDevSettings {
   showPerformanceMonitorV2?: boolean;
   // use local trading view URL for development
   useLocalTradingViewUrl?: boolean;
-  // use the data-only native chart in Market Detail
-  useTradingViewNativeInMarketDetail?: boolean;
+  // show the TradingViewNative event log panel
+  showTradingViewNativeDebugPanel?: boolean;
   showPerpsRenderStats?: boolean;
+  // Route Unifold deposits to the Arbitrum USDC destination instead of
+  // HyperCore, so the whole deposit pipeline can be exercised for source-chain
+  // gas only (funds settle back into the user's own wallet). Dev builds only —
+  // production always uses the HyperCore destination.
+  unifoldUseTestDestination?: boolean;
   mockTradingViewKLineEmptyEnabled?: boolean;
   mockTradingViewKLineEmptyIntervals?: ITradingViewKLineMockEmptyInterval[];
   // Show Market Home websocket subscription debug overlay and row highlight.
@@ -95,8 +101,7 @@ export interface IDevSettings {
   // Force IP Table strict mode: always use IP even if runtime.selections is empty
   // Fallback to first available IP from config when no selection exists
   forceIpTableStrict?: boolean;
-  // Kill switch for the fast-failover behaviors introduced for extreme
-  // network conditions (adapter fail-open + service fast switch to last-best IP)
+  // Kill switch for fast failover under extreme network conditions.
   disableIpTableFailover?: boolean;
   // Enable mock market banner data for UI testing
   enableMockMarketBanner?: boolean;
@@ -124,6 +129,10 @@ export interface IDevSettings {
   networkThrottleEnabled?: boolean;
   // Force kaspa refTx fetch to fail, so QA can verify the blind-sign fallback.
   mockKaspaRefTxFetchFailed?: boolean;
+  // Override the remote visibility flag so the entries it gates keep rendering
+  // regardless of its value. Default off; only honored while dev mode is
+  // enabled.
+  ignoreReviewControl?: boolean;
 }
 
 export type IDevSettingsKeys = keyof IDevSettings;
@@ -141,6 +150,15 @@ export function getDevSettingsNetworkThrottleEnabled(
     return false;
   }
   return devSettings.settings?.networkThrottleEnabled ?? defaultEnabled;
+}
+
+export function getDevSettingsIgnoreReviewControl(
+  devSettings: IDevSettingsPersistAtom,
+) {
+  if (!devSettings.enabled) {
+    return false;
+  }
+  return Boolean(devSettings.settings?.ignoreReviewControl);
 }
 export const {
   target: devSettingsPersistAtom,
@@ -170,7 +188,7 @@ export const {
         selectedTab: ETabRoutes.Home,
       },
       useLocalTradingViewUrl: false,
-      useTradingViewNativeInMarketDetail: false,
+      showTradingViewNativeDebugPanel: false,
       mockTradingViewKLineEmptyEnabled: false,
       mockTradingViewKLineEmptyIntervals: ['1m'],
       showMarketHomeWsDebug: false,
@@ -204,6 +222,9 @@ export type IFirmwareUpdateDevSettings = {
   showDeviceDebugLogs: boolean;
   showAutoCheckHardwareUpdatesToast: boolean;
   forceUpdateBtcOnlyUniversalFirmware: boolean;
+  hidePro2FirmwareDebugInfo: boolean;
+  pro2ForceUpdateTargets: IPro2FirmwareUpdateTarget[];
+  pro2ForceUpdateOnceTargets: IPro2FirmwareUpdateTarget[];
 };
 export type IFirmwareUpdateDevSettingsKeys = keyof IFirmwareUpdateDevSettings;
 export const {
@@ -230,8 +251,24 @@ export const {
     showDeviceDebugLogs: false,
     showAutoCheckHardwareUpdatesToast: false,
     forceUpdateBtcOnlyUniversalFirmware: false,
+    hidePro2FirmwareDebugInfo: false,
+    pro2ForceUpdateTargets: [],
+    pro2ForceUpdateOnceTargets: [],
   },
 });
+
+// Firmware update dev settings only take effect while global developer mode is
+// enabled; callers outside ServiceDevSetting must go through this gate too.
+export async function getGatedFirmwareUpdateDevSetting<
+  T extends IFirmwareUpdateDevSettingsKeys,
+>(key: T): Promise<IFirmwareUpdateDevSettings[T] | undefined> {
+  const dev = await devSettingsPersistAtom.get();
+  if (!dev.enabled) {
+    return undefined;
+  }
+  const fwDev = await firmwareUpdateDevSettingsPersistAtom.get();
+  return fwDev[key];
+}
 
 export type INotificationsDevSettings = {
   showMessagePushSource?: boolean;

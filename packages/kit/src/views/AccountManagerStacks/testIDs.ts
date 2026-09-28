@@ -27,7 +27,9 @@ export const AccountManagerTestIDs = {
   exportMnemonicKey: (name: string) => `popover-export-mnemonic-key-${name}`, // preserve existing
 
   // Wallet rename
+  walletRenameButton: 'account-manager-wallet-rename-button',
   walletRenameInput: 'account-manager-wallet-rename-input',
+  walletRenameError: 'account-manager-wallet-rename-error',
   walletRenameConfirm: 'account-manager-wallet-rename-confirm',
 
   // Account rename
@@ -41,6 +43,10 @@ export const AccountManagerTestIDs = {
   // Wallet remove
   walletRemoveButton: 'account-manager-wallet-remove-button',
   walletRemoveConfirm: 'account-manager-wallet-remove-confirm',
+
+  // Deprecated wallet banner (device was reset)
+  deprecatedWalletPrimaryButton: 'account-manager-deprecated-wallet-primary',
+  deprecatedWalletRemoveButton: 'account-manager-deprecated-wallet-remove',
 
   // Bot wallet manager
   botWalletVisibilityToggleBtn: 'bot-wallet-manager-visibility-toggle-btn',

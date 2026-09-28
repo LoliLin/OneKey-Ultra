@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import BigNumber from 'bignumber.js';
+import { useIntl } from 'react-intl';
 
+import { Toast } from '@onekeyhq/components';
 import backgroundApiProxy from '@onekeyhq/kit/src/background/instance/backgroundApiProxy';
 import { usePromiseResult } from '@onekeyhq/kit/src/hooks/usePromiseResult';
 import { useActiveAccount } from '@onekeyhq/kit/src/states/jotai/contexts/accountSelector';
 import {
   useSwapAlertsAtom,
   useSwapFromTokenAmountAtom,
+  useSwapNativeTokenReserveGasAtom,
   useSwapStockBalanceDisplayCacheAtom,
   useSwapToTokenAmountAtom,
 } from '@onekeyhq/kit/src/states/jotai/contexts/swap';
@@ -22,6 +25,8 @@ import {
   EAppEventBusNames,
   appEventBus,
 } from '@onekeyhq/shared/src/eventBus/appEventBus';
+import { ETranslations } from '@onekeyhq/shared/src/locale';
+import { numberFormat } from '@onekeyhq/shared/src/utils/numberUtils';
 import { buildSwapSelectedTokensColdStartAccountKey } from '@onekeyhq/shared/src/utils/swapColdStartCacheSnapshotUtils';
 import { equalTokenNoCaseSensitive } from '@onekeyhq/shared/src/utils/tokenUtils';
 import {
@@ -34,15 +39,19 @@ import {
   resolveSwapBalanceDisplayCacheEntry,
   updateSwapBalanceDisplayCache,
 } from '../utils/swapBalanceDisplayCacheUtils';
+import { calcSwapProSliderAvailableBalance } from '../utils/swapProAmountSliderUtils';
 import { buildSwapRateDifference } from '../utils/swapRateDifferenceUtils';
 
 import {
   type IStockBalanceSnapshot,
+  isStockBalanceActionReady,
   isStockBalanceInitializing,
   isStockPayTokenReadyForTradeInput,
   resolveStockBalanceSeed,
   resolveStockBalanceSnapshot,
   resolveStockBalanceViewState,
+  resolveStockExecutionTokenMetadata,
+  resolveStockTradeInputTokenStatus,
   shouldRenderStockTradeInputSkeleton,
 } from './swapStockChannelUtils';
 import {
@@ -58,6 +67,7 @@ import {
 import { isQuoteResultForStockTrade } from './swapStockQuoteUtils';
 import {
   ESwapStockChannelAsyncStatus,
+  ESwapStockChannelStage,
   ESwapStockTradeSide,
   type IUseSwapStockChannelReturn,
 } from './useSwapStockChannel';
@@ -79,6 +89,24 @@ function getStockInputTokenIdentityKey(token?: Partial<ISwapToken>) {
   return `${token.networkId}:${token.contractAddress ?? ''}:${
     token.isNative ? 'native' : 'token'
   }`;
+}
+
+export function calcSwapStockPercentageAmount({
+  balanceParsed,
+  isNative,
+  reserveGas,
+  stage,
+}: {
+  balanceParsed?: string;
+  isNative?: boolean;
+  reserveGas?: string | number;
+  stage: number;
+}): BigNumber {
+  return calcSwapProSliderAvailableBalance({
+    balanceParsed,
+    isNative,
+    reserveGas,
+  }).multipliedBy(stage / 100);
 }
 
 function useStockInputTokenBalance({
@@ -313,10 +341,11 @@ function useStockInputTokenBalance({
     detailResolved && detailState.hasAuthoritativeBalance
       ? detailState.balance
       : undefined;
+  const authoritativeTokenDetail =
+    authoritativeBalance !== undefined ? detailState.tokenDetail : undefined;
   const balanceState = resolveStockBalanceSnapshot({
     authoritativeBalance,
-    authoritativeTokenDetail:
-      authoritativeBalance !== undefined ? detailState.tokenDetail : undefined,
+    authoritativeTokenDetail,
     ownerScope: balanceOwnerScope,
     previousSnapshot: lastValidBalanceStateRef.current,
     seededBalance: enabled ? seededBalance : undefined,
@@ -367,6 +396,7 @@ function useStockInputTokenBalance({
   ]);
 
   return {
+    authoritativeTokenDetail,
     balance: balanceViewState.balance,
     displayBalance: balanceViewState.displayBalance,
     ownerScope: balanceOwnerScope,
@@ -435,7 +465,13 @@ export function useSwapStockEstimatedReceiveState({
   const receiveAmount =
     quoteToAmount ||
     (!quoteResult && !forceHideQuote ? toTokenAmount.value : '');
-  const isLoading = quoteLoading || quoteEventFetching;
+  const isStockTradeChannelInitializing =
+    stockChannel.isStockTokenChanging ||
+    stockChannel.channelStage === ESwapStockChannelStage.InitializingStock ||
+    stockChannel.channelStage === ESwapStockChannelStage.CheckingMarketStatus ||
+    stockChannel.channelStage === ESwapStockChannelStage.InitializingPayToken;
+  const isLoading =
+    quoteLoading || quoteEventFetching || isStockTradeChannelInitializing;
   const isSellSide = stockChannel.tradeSide === ESwapStockTradeSide.Sell;
   const canSelectReceiveToken =
     isSellSide && stockChannel.selectablePayTokens.length > 1 && !isLoading;
@@ -545,6 +581,7 @@ export function useSwapStockEstimatedReceiveState({
     isSellSide,
     isReceiveTokenPopoverOpen,
     onReceiveTokenPress,
+    quoteMatchesStockTrade,
     rateDifference,
     receiveAmount,
     receiveFiatValue,
@@ -558,8 +595,10 @@ export function useSwapStockAmountInputState({
 }: {
   stockChannel: IUseSwapStockChannelReturn;
 }) {
+  const intl = useIntl();
   const [fromTokenAmount, setFromTokenAmount] = useSwapFromTokenAmountAtom();
   const [, setSwapAlerts] = useSwapAlertsAtom();
+  const [swapNativeTokenReserveGas] = useSwapNativeTokenReserveGasAtom();
   const [settingsPersistAtom] = useSettingsPersistAtom();
   const [{ currencyMap }] = useCurrencyPersistAtom();
   const {
@@ -572,11 +611,16 @@ export function useSwapStockAmountInputState({
     disableNativePayToken,
     selectPayToken,
     stockTokenStatus,
+    syncStockTokenDetail,
     tradeSide,
   } = stockChannel;
   const isBuySide = tradeSide === ESwapStockTradeSide.Buy;
   const inputToken = isBuySide ? payToken : currentStockToken;
-  const inputTokenStatus = isBuySide ? payTokenStatus : stockTokenStatus;
+  const inputTokenStatus = resolveStockTradeInputTokenStatus({
+    isBuySide,
+    payTokenStatus,
+    stockTokenStatus,
+  });
   const inputTokenVisible = Boolean(inputToken);
   const stockIdentityReady =
     stockTokenStatus === ESwapStockChannelAsyncStatus.Ready;
@@ -589,13 +633,38 @@ export function useSwapStockAmountInputState({
   const inputTokenReady = isBuySide
     ? payTokenReady
     : stockIdentityReady && inputTokenVisible;
+  const isStockTradeChannelInitializing =
+    stockChannel.isStockTokenChanging ||
+    stockChannel.channelStage === ESwapStockChannelStage.InitializingStock ||
+    stockChannel.channelStage === ESwapStockChannelStage.CheckingMarketStatus ||
+    stockChannel.channelStage === ESwapStockChannelStage.InitializingPayToken;
   const stockInputTokenBalance = useStockInputTokenBalance({
     enabled: inputTokenReady,
     refreshOwnedByPayTokenDetails: isBuySide,
     token: inputToken,
   });
+  const authoritativeStockInputToken = isBuySide
+    ? undefined
+    : resolveStockExecutionTokenMetadata({
+        token: inputToken,
+        tokenDetail: stockInputTokenBalance.authoritativeTokenDetail,
+      });
+  const balanceActionsReady = isStockBalanceActionReady({
+    authoritativeBalance: stockInputTokenBalance.balance,
+    authoritativeStockToken: authoritativeStockInputToken,
+    isBuySide,
+  });
+  const amountInputToken = authoritativeStockInputToken ?? inputToken;
   const resolvedInputTokenBalance = stockInputTokenBalance.balance ?? '0';
-  const displayBalance = stockInputTokenBalance.displayBalance ?? '0';
+  const reserveGas = useMemo(() => {
+    if (!inputToken?.isNative) {
+      return undefined;
+    }
+    return swapNativeTokenReserveGas.find(
+      (item) => item.networkId === inputToken.networkId,
+    )?.reserveGas;
+  }, [inputToken?.isNative, inputToken?.networkId, swapNativeTokenReserveGas]);
+  const displayBalance = stockInputTokenBalance.displayBalance ?? '--';
   const inputTokenNetworkLogoURI =
     inputToken?.networkLogoURI ?? getNetworkLogoURI(inputToken?.networkId);
   const inputTokenPrice =
@@ -626,7 +695,7 @@ export function useSwapStockAmountInputState({
     settingsPersistAtom.currencyInfo.symbol;
   const onAmountChange = useCallback(
     (value: string) => {
-      if (validateAmountInput(value, inputToken?.decimals)) {
+      if (validateAmountInput(value, amountInputToken?.decimals)) {
         setSwapAlerts({
           quoteId: '',
           states: [],
@@ -637,17 +706,17 @@ export function useSwapStockAmountInputState({
         });
       }
     },
-    [inputToken?.decimals, setFromTokenAmount, setSwapAlerts],
+    [amountInputToken?.decimals, setFromTokenAmount, setSwapAlerts],
   );
   const setInputAmount = useCallback(
     (amount: BigNumber) => {
-      if (!inputToken || !amount.isFinite() || amount.isNaN()) {
+      if (!amountInputToken || !amount.isFinite() || amount.isNaN()) {
         return;
       }
       const amountValue = amount
-        .decimalPlaces(Number(inputToken.decimals ?? 6), BigNumber.ROUND_DOWN)
+        .decimalPlaces(amountInputToken.decimals, BigNumber.ROUND_DOWN)
         .toFixed();
-      if (!validateAmountInput(amountValue, inputToken.decimals)) {
+      if (!validateAmountInput(amountValue, amountInputToken.decimals)) {
         return;
       }
       setSwapAlerts({
@@ -659,27 +728,82 @@ export function useSwapStockAmountInputState({
         isInput: true,
       });
     },
-    [inputToken, setFromTokenAmount, setSwapAlerts],
+    [amountInputToken, setFromTokenAmount, setSwapAlerts],
   );
-  const onBalanceMaxPress = useCallback(() => {
-    if (stockInputTokenBalance.balance === undefined) {
+  useEffect(() => {
+    if (!authoritativeStockInputToken) {
       return;
     }
-    setInputAmount(new BigNumber(resolvedInputTokenBalance));
+    syncStockTokenDetail(authoritativeStockInputToken);
+  }, [authoritativeStockInputToken, syncStockTokenDetail]);
+  const onBalanceMaxPress = useCallback(() => {
+    if (!balanceActionsReady) {
+      return;
+    }
+    if (authoritativeStockInputToken) {
+      syncStockTokenDetail(authoritativeStockInputToken);
+    }
+    const balanceBN = new BigNumber(resolvedInputTokenBalance);
+    let maxAmount = balanceBN;
+    if (inputToken?.isNative) {
+      const reserveGasBN = new BigNumber(reserveGas ?? '');
+      if (reserveGasBN.isFinite() && reserveGasBN.gt(0)) {
+        maxAmount = BigNumber.max(0, balanceBN.minus(reserveGasBN));
+      }
+      const reserveGasFormatted = reserveGas
+        ? numberFormat(reserveGas.toString(), {
+            formatter: 'balance',
+            formatterOptions: { tokenSymbol: inputToken.symbol },
+          })
+        : undefined;
+      Toast.message({
+        title: intl.formatMessage(
+          {
+            id: reserveGasFormatted
+              ? ETranslations.swap_native_token_max_tip_already
+              : ETranslations.swap_native_token_max_tip,
+          },
+          { num_token: reserveGasFormatted },
+        ),
+      });
+    }
+    setInputAmount(maxAmount);
   }, [
+    authoritativeStockInputToken,
+    balanceActionsReady,
+    inputToken?.isNative,
+    inputToken?.symbol,
+    intl,
+    reserveGas,
     resolvedInputTokenBalance,
     setInputAmount,
-    stockInputTokenBalance.balance,
+    syncStockTokenDetail,
   ]);
   const onSelectPercentageStage = useCallback(
     (stage: number) => {
-      if (stockInputTokenBalance.balance === undefined) {
+      if (!balanceActionsReady) {
         return;
       }
-      const balanceBN = new BigNumber(resolvedInputTokenBalance);
-      setInputAmount(balanceBN.multipliedBy(stage / 100));
+      if (authoritativeStockInputToken) {
+        syncStockTokenDetail(authoritativeStockInputToken);
+      }
+      const amount = calcSwapStockPercentageAmount({
+        balanceParsed: resolvedInputTokenBalance,
+        isNative: inputToken?.isNative,
+        reserveGas,
+        stage,
+      });
+      setInputAmount(amount);
     },
-    [resolvedInputTokenBalance, setInputAmount, stockInputTokenBalance.balance],
+    [
+      authoritativeStockInputToken,
+      balanceActionsReady,
+      inputToken?.isNative,
+      reserveGas,
+      resolvedInputTokenBalance,
+      setInputAmount,
+      syncStockTokenDetail,
+    ],
   );
   const hasBalanceError = useMemo(() => {
     if (!isBuySide || !inputToken) {
@@ -715,12 +839,13 @@ export function useSwapStockAmountInputState({
 
   return {
     amountFiatValue,
+    balanceActionsReady,
     balanceLoading: stockInputTokenBalance.loading,
     currencySymbol,
     disableNativePayToken,
     displayBalance,
     hasBalanceError,
-    inputToken,
+    inputToken: amountInputToken,
     inputTokenNetworkLogoURI,
     inputValue: fromTokenAmount.value,
     isBuySide,
@@ -732,11 +857,13 @@ export function useSwapStockAmountInputState({
     payTokens,
     selectablePayTokens,
     selectPayToken,
-    shouldRenderSkeleton: shouldRenderStockTradeInputSkeleton({
-      inputTokenStatus,
-      inputTokenReady,
-      inputTokenVisible,
-      isBuySide,
-    }),
+    shouldRenderSkeleton:
+      isStockTradeChannelInitializing ||
+      shouldRenderStockTradeInputSkeleton({
+        inputTokenStatus,
+        inputTokenReady,
+        inputTokenVisible,
+        isBuySide,
+      }),
   };
 }

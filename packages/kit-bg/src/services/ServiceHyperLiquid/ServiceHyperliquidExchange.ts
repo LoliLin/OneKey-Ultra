@@ -1,4 +1,8 @@
-import { ExchangeClient, HttpTransport } from '@nktkas/hyperliquid';
+import {
+  ExchangeClient,
+  HttpRequestError,
+  HttpTransport,
+} from '@nktkas/hyperliquid';
 import { BigNumber } from 'bignumber.js';
 import { isNumber } from 'lodash';
 
@@ -7,6 +11,7 @@ import {
   backgroundClass,
   backgroundMethod,
 } from '@onekeyhq/shared/src/background/backgroundDecorators';
+import { getNetworkIdsMap } from '@onekeyhq/shared/src/config/networkIds';
 import {
   DISABLE_PERPS_WALLET_BIND,
   type EHyperLiquidAgentName,
@@ -32,10 +37,12 @@ import type {
 } from '@onekeyhq/shared/src/logger/scopes/perp/scenes/hyperliquid';
 import accountUtils from '@onekeyhq/shared/src/utils/accountUtils';
 import { convertHyperLiquidResponse } from '@onekeyhq/shared/src/utils/hyperLiquidErrorResolver';
+import { isUnifiedPortfolioMode } from '@onekeyhq/shared/src/utils/hyperliquidPortfolioUtils';
 import {
   assertValidScaleOrderLegs,
   buildScaleOrderLegs,
 } from '@onekeyhq/shared/src/utils/hyperliquidScaleOrderUtils';
+import { normalizeDexCoin } from '@onekeyhq/shared/src/utils/perpsDexUtils';
 import {
   MAX_DECIMALS_PERP,
   formatHlPrice,
@@ -46,7 +53,15 @@ import {
   mapTriggerOrderType,
   parseSignatureToRSV,
 } from '@onekeyhq/shared/src/utils/perpsUtils';
-import { SPOT_ASSET_ID_OFFSET } from '@onekeyhq/shared/types/hyperliquid/perp.constants';
+import {
+  HYPEREVM_SYSTEM_ADDRESS,
+  SPOT_ASSET_ID_OFFSET,
+  USDC_WITHDRAW_GAS_RESERVE,
+} from '@onekeyhq/shared/types/hyperliquid/perp.constants';
+import type {
+  IUsdcWithdrawDestinationId,
+  IUsdcWithdrawFeeQuote,
+} from '@onekeyhq/shared/types/hyperliquid/perp.constants';
 import type {
   IApiErrorResponse,
   IApiRequestResult,
@@ -87,11 +102,23 @@ import type { IHyperLiquidSignatureRSV } from '@onekeyhq/shared/types/hyperliqui
 import { ERookieTaskType } from '@onekeyhq/shared/types/rookieGuide';
 
 import {
+  perpsAbstractionModeAtom,
   perpsActiveAccountAtom,
   perpsActiveAccountStatusAtom,
 } from '../../states/jotai/atoms';
 import ServiceBase from '../ServiceBase';
 
+import {
+  buildCctpWithdrawDestination,
+  getLiveUsdcWithdrawFee,
+  getUsdcWithdrawFee,
+  requireUsdcWithdrawDestination,
+} from './cctpWithdraw';
+import { hyperLiquidApiClients } from './hyperLiquidApiClients';
+import {
+  getLiveUsdcWithdrawRoute,
+  getUsdcWithdrawRoute,
+} from './usdcWithdrawRoute';
 import {
   buildCoinScopedOrderOpenParams,
   getOrderOpenGrouping,
@@ -102,11 +129,18 @@ import {
   buildHyperliquidModifyRequest,
 } from './utils/orderAmend';
 
+import type { IHyperEvmRpcCall } from './cctpWithdraw';
 import type {
   WalletHyperliquidOnekey,
   WalletHyperliquidProxy,
 } from './ServiceHyperliquidWallet';
+import type { IUsdcWithdrawRoute } from './usdcWithdrawRoute';
 import type { IBackgroundApi } from '../../apis/IBackgroundApi';
+
+type IHyperLiquidAgentCredentialInfo = Omit<
+  ICoreHyperLiquidAgentCredential,
+  'privateKey'
+>;
 
 interface IOrderLogOptions {
   action?: IHyperLiquidOrderAction;
@@ -114,10 +148,22 @@ interface IOrderLogOptions {
   extra?: Record<string, unknown>;
 }
 
+interface IOrderAccountGuardOptions {
+  // Account the user confirmed; the signing client must still belong to it.
+  expectedAccountAddress?: string;
+}
+
+type IPlaceOrderRawOptions = IOrderLogOptions & IOrderAccountGuardOptions;
+
 interface IOrderAssetPrecision {
   szDecimals: number;
   type: 'perp' | 'spot';
 }
+
+// Hyperliquid treats FrontendMarket as its own market-order TIF: it never rests,
+// so it survives the open-interest-cap guard that rejects orders priced beyond
+// the oracle band, and the fill is labelled Market instead of Limit IOC.
+const MARKET_ORDER_TIF = 'FrontendMarket' as const;
 
 function isUserLimitTif(value: unknown): value is ITIF {
   return value === 'Gtc' || value === 'Ioc' || value === 'Alo';
@@ -134,16 +180,6 @@ interface IOrderLogContext {
   exchangeAccountAddress: string | null;
 }
 
-// TV lowercases everything; HL universe keys perps as `BTC`, spot as `@N`,
-// and sub-DEX as `xyz:<TICKER>` (lowercase prefix, uppercase ticker).
-function normalizePerpsCoin(coin: string): string {
-  if (!coin) return coin;
-  if (coin.startsWith('@')) return coin;
-  const xyzMatch = coin.match(/^xyz:(.*)$/i);
-  if (xyzMatch) return `xyz:${xyzMatch[1].toUpperCase()}`;
-  return coin.toUpperCase();
-}
-
 @backgroundClass()
 export default class ServiceHyperliquidExchange extends ServiceBase {
   constructor({ backgroundApi }: { backgroundApi: IBackgroundApi }) {
@@ -151,6 +187,8 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
   }
 
   private _account: string | null = null;
+
+  private _userAddress: string | null = null;
 
   private _exchangeClient: ExchangeClient | null = null;
 
@@ -365,7 +403,7 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
   async setup(params: {
     userAddress: IHex | undefined;
     userAccountId?: string;
-    agentCredential?: ICoreHyperLiquidAgentCredential;
+    agentCredential?: IHyperLiquidAgentCredentialInfo;
   }): Promise<void> {
     try {
       const { hyperliquidBuilderAddress, hyperliquidMaxBuilderFee } =
@@ -415,6 +453,7 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
       );
 
       this._account = account;
+      this._userAddress = params.userAddress;
       this._wallet = wallet;
     } catch (error) {
       throw new OneKeyLocalError(
@@ -441,7 +480,9 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
   /**
    * Get exchange client for trading operations with automatic agent authorization
    */
-  private async getExchangeClientForTrading(): Promise<ExchangeClient> {
+  private async getExchangeClientForTrading(
+    options: IOrderAccountGuardOptions = {},
+  ): Promise<ExchangeClient> {
     const isReady = await this._ensureAgentReady();
 
     if (!isReady) {
@@ -450,7 +491,36 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
       );
     }
 
-    return this.exchangeClient;
+    // Take the client and verify its owner in one synchronous step so a
+    // concurrent setup() for another account cannot swap it in between.
+    const client = this.exchangeClient;
+    this._assertExchangeUserAddress(options.expectedAccountAddress);
+    return client;
+  }
+
+  private async _resolveExpectedAccountAddress(
+    options: IOrderAccountGuardOptions,
+  ): Promise<string | undefined> {
+    if (options.expectedAccountAddress) {
+      return options.expectedAccountAddress;
+    }
+    const activeAccount = await perpsActiveAccountAtom.get();
+    return activeAccount?.accountAddress || undefined;
+  }
+
+  private _assertExchangeUserAddress(expectedAccountAddress?: string) {
+    if (!expectedAccountAddress) {
+      return;
+    }
+    if (
+      this._userAddress?.toLowerCase() !== expectedAccountAddress.toLowerCase()
+    ) {
+      throw new OneKeyLocalError(
+        appLocale.intl.formatMessage({
+          id: ETranslations.active_trading_account_changed__msg,
+        }),
+      );
+    }
   }
 
   @backgroundMethod()
@@ -468,6 +538,11 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
         response,
         ...buildHyperLiquidLogResult({ startedAt }),
       });
+      if (context.accountAddress) {
+        await this.backgroundApi.serviceHyperliquidReferral.invalidateBannerCache(
+          { userAddress: context.accountAddress },
+        );
+      }
       return response;
     } catch (error) {
       defaultLogger.perp.hyperliquid.setReferrer({
@@ -811,14 +886,18 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
       orders: IOrderParams[];
       grouping: IOrderRequest['grouping'];
     },
-    options: IOrderLogOptions = {},
+    options: IPlaceOrderRawOptions = {},
   ): Promise<IOrderResponse> {
+    const expectedAccountAddress =
+      await this._resolveExpectedAccountAddress(options);
     await this.checkAccountCanTrade();
 
     const formattedOrders = await this._formatOrdersForHyperLiquid(orders, {
       allowZeroSize: grouping === 'positionTpsl',
     });
-    const client = await this.getExchangeClientForTrading();
+    const client = await this.getExchangeClientForTrading({
+      expectedAccountAddress,
+    });
     const requestPayload: IHyperLiquidOrderRequestPayload = {
       orders: formattedOrders,
       grouping,
@@ -888,6 +967,7 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
 
   async dispose(): Promise<void> {
     this._account = null;
+    this._userAddress = null;
     this._exchangeClient = null;
     this._builderFeeInfo = undefined;
     this._wallet = null;
@@ -933,7 +1013,7 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
                 },
               }
             : {
-                limit: { tif: 'Ioc' },
+                limit: { tif: MARKET_ORDER_TIF },
               },
       };
 
@@ -1071,7 +1151,7 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
         s: params.sz,
         r: false,
         t: isMarket
-          ? { limit: { tif: params.tif || 'Ioc' } }
+          ? { limit: { tif: params.tif || MARKET_ORDER_TIF } }
           : { limit: { tif: params.tif || 'Gtc' } },
       };
 
@@ -1098,7 +1178,10 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
   }
 
   @backgroundMethod()
-  async orderOpen(params: IOrderOpenParams): Promise<IOrderResponse> {
+  async orderOpen(
+    params: IOrderOpenParams,
+    options: IOrderAccountGuardOptions = {},
+  ): Promise<IOrderResponse> {
     await this.checkAccountCanTrade();
     try {
       const isMarket = params.type === 'market';
@@ -1122,7 +1205,7 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
         t: isMarket
           ? {
               limit: {
-                tif: 'Ioc',
+                tif: MARKET_ORDER_TIF,
               },
             }
           : { limit: { tif: normalizeUserLimitTif(params.tif) } },
@@ -1188,6 +1271,7 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
         },
         {
           action: 'orderOpen',
+          expectedAccountAddress: options.expectedAccountAddress,
           originalParams: params,
           extra: {
             hasTp: Boolean(params.tpTriggerPx),
@@ -1285,15 +1369,18 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
     await this.checkAccountCanTrade();
     const ordersParam = params.map((param) => {
       let price: string;
+      let tif: 'Gtc' | typeof MARKET_ORDER_TIF;
 
       if (param.limitPx) {
         price = param.limitPx;
+        tif = 'Gtc';
       } else if (param.midPx) {
         price = this._calculateSlippagePrice({
           markPrice: param.midPx,
           isBuy: !param.isBuy,
           slippage: param.slippage || this.slippage,
         });
+        tif = MARKET_ORDER_TIF;
       } else {
         throw new OneKeyLocalError(
           'Either limitPx or midPx must be provided for order close',
@@ -1306,7 +1393,7 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
         p: price,
         s: param.size,
         r: true,
-        t: { limit: { tif: 'Gtc' } },
+        t: { limit: { tif } },
       };
 
       return orderParams;
@@ -1333,7 +1420,12 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
   }
 
   @backgroundMethod()
-  async modifyOrder(params: IModifyOrderParams): Promise<IModifyResponse> {
+  async modifyOrder(
+    params: IModifyOrderParams,
+    options: IOrderAccountGuardOptions = {},
+  ): Promise<IModifyResponse> {
+    const expectedAccountAddress =
+      await this._resolveExpectedAccountAddress(options);
     await this.checkAccountCanTrade();
 
     const order = buildHyperliquidModifyOrder(params);
@@ -1342,7 +1434,9 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
       { allowZeroSize: params.allowZeroSize },
     );
 
-    const client = await this.getExchangeClientForTrading();
+    const client = await this.getExchangeClientForTrading({
+      expectedAccountAddress,
+    });
     const requestPayload = buildHyperliquidModifyRequest({
       oid: params.oid,
       order: formattedOrder,
@@ -1561,7 +1655,7 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
   }): Promise<IOrderResponse> {
     const symbolMeta =
       await this.backgroundApi.serviceHyperliquid.getSymbolMeta({
-        coin: normalizePerpsCoin(params.coin),
+        coin: normalizeDexCoin(params.coin),
       });
     if (!symbolMeta) {
       throw new OneKeyLocalError(`Unknown coin: ${params.coin}`);
@@ -1611,7 +1705,7 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
     }
     const symbolMeta =
       await this.backgroundApi.serviceHyperliquid.getSymbolMeta({
-        coin: normalizePerpsCoin(params.coin),
+        coin: normalizeDexCoin(params.coin),
       });
     if (!symbolMeta) {
       throw new OneKeyLocalError(
@@ -1633,6 +1727,7 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
         params,
         assetId: symbolMeta.assetId,
       }),
+      { expectedAccountAddress: params.expectedAccountAddress },
     );
   }
 
@@ -1648,10 +1743,11 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
     cloid?: IHex | null;
     slippage?: number;
     alwaysPlace?: true;
+    expectedAccountAddress?: string;
   }): Promise<IModifyResponse> {
     const symbolMeta =
       await this.backgroundApi.serviceHyperliquid.getSymbolMeta({
-        coin: normalizePerpsCoin(params.coin),
+        coin: normalizeDexCoin(params.coin),
       });
     if (!symbolMeta) {
       throw new OneKeyLocalError(`Unknown coin: ${params.coin}`);
@@ -1676,38 +1772,44 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
             szDecimals: symbolMeta.universe?.szDecimals,
           })
         : formattedPrice;
-      return this.modifyOrder({
+      return this.modifyOrder(
+        {
+          oid: params.oid,
+          assetId: symbolMeta.assetId,
+          isBuy: params.isBuy,
+          sz: params.size,
+          price: executionPrice,
+          reduceOnly: params.reduceOnly,
+          orderType: {
+            trigger: {
+              isMarket: params.amendKind.isMarket,
+              triggerPx: formattedPrice,
+              tpsl: params.amendKind.tpsl,
+            },
+          },
+          cloid: params.cloid,
+          // Position TP/SL rests with sz "0"; keep it so HL preserves isPositionTpsl.
+          allowZeroSize: new BigNumber(params.size).isZero(),
+          alwaysPlace: params.alwaysPlace,
+        },
+        { expectedAccountAddress: params.expectedAccountAddress },
+      );
+    }
+
+    return this.modifyOrder(
+      {
         oid: params.oid,
         assetId: symbolMeta.assetId,
         isBuy: params.isBuy,
         sz: params.size,
-        price: executionPrice,
+        price: formattedPrice,
         reduceOnly: params.reduceOnly,
-        orderType: {
-          trigger: {
-            isMarket: params.amendKind.isMarket,
-            triggerPx: formattedPrice,
-            tpsl: params.amendKind.tpsl,
-          },
-        },
+        orderType: { limit: { tif: params.amendKind.tif } },
         cloid: params.cloid,
-        // Position TP/SL rests with sz "0"; keep it so HL preserves isPositionTpsl.
-        allowZeroSize: new BigNumber(params.size).isZero(),
         alwaysPlace: params.alwaysPlace,
-      });
-    }
-
-    return this.modifyOrder({
-      oid: params.oid,
-      assetId: symbolMeta.assetId,
-      isBuy: params.isBuy,
-      sz: params.size,
-      price: formattedPrice,
-      reduceOnly: params.reduceOnly,
-      orderType: { limit: { tif: params.amendKind.tif } },
-      cloid: params.cloid,
-      alwaysPlace: params.alwaysPlace,
-    });
+      },
+      { expectedAccountAddress: params.expectedAccountAddress },
+    );
   }
 
   @backgroundMethod()
@@ -1801,6 +1903,7 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
         },
         {
           action: 'setPositionTpsl',
+          expectedAccountAddress: params.expectedAccountAddress,
           originalParams: params,
           extra: {
             hasTp: Boolean(tpTriggerPx),
@@ -1849,8 +1952,117 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
   }
 
   @backgroundMethod()
+  async getUsdcWithdrawRoute(params?: {
+    forceRefresh?: boolean;
+  }): Promise<IUsdcWithdrawRoute> {
+    return getUsdcWithdrawRoute(params);
+  }
+
+  private _callHyperEvmRpc: IHyperEvmRpcCall = async (method, params) => {
+    const [result] = await this.backgroundApi.serviceDApp.proxyRPCCall<unknown>(
+      {
+        networkId: getNetworkIdsMap().hyperevm,
+        request: {
+          jsonrpc: '2.0',
+          id: 0,
+          method,
+          params,
+        },
+        origin: 'onekey://perps',
+      },
+    );
+    return result;
+  };
+
+  @backgroundMethod()
+  async getUsdcWithdrawFee(params: {
+    destinationId: IUsdcWithdrawDestinationId;
+  }): Promise<IUsdcWithdrawFeeQuote> {
+    return getUsdcWithdrawFee(params.destinationId, this._callHyperEvmRpc);
+  }
+
+  @backgroundMethod()
+  async getUsdcWithdrawReserve(params: { userAccountId: string }) {
+    try {
+      const wallet =
+        await this.backgroundApi.serviceHyperliquidWallet.getOnekeyWallet(
+          params,
+        );
+      const accountAddress = await wallet.getAddress();
+      try {
+        const result = await hyperLiquidApiClients.infoClient.preTransferCheck({
+          source: accountAddress,
+          user: HYPEREVM_SYSTEM_ADDRESS,
+        });
+        const fee = result?.fee;
+        if (
+          typeof fee !== 'string' ||
+          !/^\d+(\.\d+)?$/.test(fee) ||
+          !new BigNumber(fee).isFinite() ||
+          result.isSanctioned !== false
+        ) {
+          defaultLogger.perp.hyperliquid.preTransferCheckFailure({
+            reason:
+              result?.isSanctioned === true ? 'restricted' : 'invalidResponse',
+            fallbackApplied: false,
+          });
+          return undefined;
+        }
+        return {
+          accountAddress,
+          // The cent is a minimum buffer, not an extra charge on top of the fee.
+          reserve: BigNumber.maximum(fee, USDC_WITHDRAW_GAS_RESERVE).toFixed(),
+          isEstimate: false,
+        };
+      } catch (error) {
+        const httpStatus =
+          error instanceof HttpRequestError
+            ? error.response?.status
+            : undefined;
+        const fallbackApplied =
+          error instanceof HttpRequestError &&
+          // The SDK also wraps JSON parsing errors without a response.
+          !(error.cause instanceof SyntaxError) &&
+          (httpStatus === undefined || (httpStatus >= 500 && httpStatus < 600));
+        defaultLogger.perp.hyperliquid.preTransferCheckFailure({
+          reason: 'requestFailed',
+          httpStatus,
+          fallbackApplied,
+        });
+        if (fallbackApplied) {
+          // An unavailable fee estimate must not disable the withdrawal rail.
+          // Leave the activation fee plus a gas buffer in the source account.
+          return { accountAddress, reserve: '1.01', isEstimate: true };
+        }
+        return undefined;
+      }
+    } catch (error) {
+      console.error('[getUsdcWithdrawReserve] Failed to check reserve:', error);
+      return undefined;
+    }
+  }
+
+  // Mirrors perpsComputedAccountValueAtom so the action spends the same balance
+  // the withdraw form validated the amount against.
+  private async _resolveWithdrawSourceDex(
+    userAddress: string | undefined,
+  ): Promise<'' | 'spot'> {
+    const modeData = await perpsAbstractionModeAtom.get();
+    const isModeForThisAccount =
+      Boolean(userAddress) &&
+      modeData?.accountAddress?.toLowerCase() === userAddress?.toLowerCase();
+    if (!isModeForThisAccount) {
+      return '';
+    }
+    return isUnifiedPortfolioMode(modeData?.mode) ? 'spot' : '';
+  }
+
+  @backgroundMethod()
   async withdraw(params: IWithdrawParams): Promise<void> {
     await this.checkAccountCanTrade();
+    const destinationConfig = requireUsdcWithdrawDestination(
+      params.destinationId,
+    );
     const wallet =
       await this.backgroundApi.serviceHyperliquidWallet.getOnekeyWallet({
         userAccountId: params.userAccountId,
@@ -1859,23 +2071,108 @@ export default class ServiceHyperliquidExchange extends ServiceBase {
       new ExchangeClient({
         transport: new HttpTransport(),
         wallet,
-        signatureChainId: PERPS_EVM_CHAIN_ID_HEX,
+        signatureChainId: destinationConfig.signatureChainId,
       }),
     );
     const context = await this._buildLogContext();
     const startedAt = Date.now();
+    // Declared outside the try so a failure before the action still logs them.
+    let route: IUsdcWithdrawRoute | undefined;
+    let sourceDex: '' | 'spot' | undefined;
     try {
-      await convertHyperLiquidResponse(() => exchangeClient.withdraw3(params));
+      const [resolvedRoute, userAddress] = await Promise.all([
+        destinationConfig.transferType === 'cctp'
+          ? getLiveUsdcWithdrawRoute()
+          : Promise.resolve(undefined),
+        wallet.getAddress(),
+      ]);
+      route = resolvedRoute;
+      if (
+        destinationConfig.transferType === 'cctp' &&
+        (!params.expectedRoute || route !== params.expectedRoute)
+      ) {
+        throw new OneKeyLocalError(
+          'Withdrawal route changed. Review the updated fee and try again.',
+        );
+      }
+      if (
+        destinationConfig.transferType === 'cctp' &&
+        route === 'bridge' &&
+        !destinationConfig.supportsLegacyBridge
+      ) {
+        throw new OneKeyLocalError(
+          `${destinationConfig.name} withdrawals require the CCTP route`,
+        );
+      }
+      if (destinationConfig.transferType === 'cctp' && route === 'cctp') {
+        const liveFeeQuote = await getLiveUsdcWithdrawFee(
+          params.destinationId,
+          this._callHyperEvmRpc,
+        );
+        const cctpFee = liveFeeQuote.components.find(
+          (component) => component.kind === 'cctpForwarding',
+        );
+        if (!cctpFee?.amount) {
+          throw new OneKeyLocalError('Unable to quote CCTP withdrawal fee');
+        }
+        if (
+          !params.expectedCctpFee ||
+          !new BigNumber(params.expectedCctpFee).eq(cctpFee.amount)
+        ) {
+          throw new OneKeyLocalError(
+            'Withdrawal fee changed. Review the updated fee and try again.',
+          );
+        }
+        if (new BigNumber(params.amount).lte(cctpFee.amount)) {
+          throw new OneKeyLocalError(
+            'Withdrawal amount must exceed the CCTP fee',
+          );
+        }
+      }
+      await convertHyperLiquidResponse(async () => {
+        if (destinationConfig.transferType === 'hyperEvm') {
+          sourceDex = await this._resolveWithdrawSourceDex(userAddress);
+          return exchangeClient.sendAsset({
+            destination: HYPEREVM_SYSTEM_ADDRESS,
+            sourceDex,
+            destinationDex: 'spot',
+            token: 'USDC',
+            amount: params.amount,
+            fromSubAccount: '',
+          });
+        }
+        if (route === 'cctp') {
+          sourceDex = await this._resolveWithdrawSourceDex(userAddress);
+          const destination = buildCctpWithdrawDestination({
+            destinationId: params.destinationId,
+            ownerAddress: userAddress,
+          });
+          return exchangeClient.sendToEvmWithData({
+            token: 'USDC',
+            amount: params.amount,
+            sourceDex,
+            destinationRecipient: destination.destinationRecipient,
+            addressEncoding: destination.addressEncoding,
+            destinationChainId: destination.destinationChainId,
+            gasLimit: destination.gasLimit,
+            data: destination.data,
+          });
+        }
+        return exchangeClient.withdraw3({
+          amount: params.amount,
+          destination: userAddress,
+        });
+      });
       defaultLogger.perp.hyperliquid.withdraw({
         ...context,
-        request: params,
+        request: { ...params, route, sourceDex },
         response: { success: true },
         ...buildHyperLiquidLogResult({ startedAt }),
       });
     } catch (error) {
       defaultLogger.perp.hyperliquid.withdraw({
         ...context,
-        request: params,
+        request: { ...params, route, sourceDex },
         response: extractHyperLiquidErrorResponse<IApiErrorResponse>(error),
         error: serializeHyperLiquidError(error),
         ...buildHyperLiquidLogResult({ startedAt, error }),
